@@ -4,3 +4,5 @@ python-dotenv==1.0.0
 sounddevice==0.5.1
 groq>=0.13.0
 librosa>=0.10.1
+openwakeword>=0.6.0
+onnxruntime>=1.16.0

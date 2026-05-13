@@ -1,0 +1,17 @@
+# Local secrets (keep .env.example tracked)
+.env
+
+# Node
+node_modules/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/

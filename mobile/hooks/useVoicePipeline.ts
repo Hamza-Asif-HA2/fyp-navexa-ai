@@ -38,6 +38,12 @@ const WAKE_WORD_URL = process.env.EXPO_PUBLIC_WAKE_WORD_WS ?? '';
 const SILENCE_DB_THRESHOLD = -40;
 const SILENCE_WINDOW_MS = 1500;
 const SILENCE_CHECK_MS = 500;
+const WAKE_SCAN_RECORD_MS = 620;
+const WAKE_SCAN_GAP_MS = 400;
+const WAKE_COOLDOWN_MS = 2200;
+
+/** Serialize wake snippets if multiple screens mount `useVoicePipeline`. */
+let wakeSnippetGlobalLock = false;
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -72,6 +78,13 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
   const onActionRef = useRef<UseVoicePipelineArgs['onAction']>(onAction);
   const getContextRef = useRef<UseVoicePipelineArgs['getContext']>(getContext);
   const conversationHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const pipelineStateRef = useRef<PipelineState>('idle');
+  const wakeScanInProgressRef = useRef(false);
+  const wakeCooldownUntilRef = useRef(0);
+
+  useEffect(() => {
+    pipelineStateRef.current = pipelineState;
+  }, [pipelineState]);
 
   useEffect(() => {
     onActionRef.current = onAction;
@@ -488,6 +501,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
           const payload = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (payload?.event === 'WAKE_WORD_DETECTED' || payload?.wake === true) {
             console.log('[PIPELINE] WAKE_WORD_DETECTED parsed from JSON payload');
+            wakeCooldownUntilRef.current = Date.now() + WAKE_COOLDOWN_MS;
             startListeningRef.current();
             return;
           }
@@ -497,6 +511,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
         if (event.data === 'WAKE_WORD_DETECTED') {
           console.log('[PIPELINE] WAKE_WORD_DETECTED plain string payload');
+          wakeCooldownUntilRef.current = Date.now() + WAKE_COOLDOWN_MS;
           startListeningRef.current();
         }
       };
@@ -533,6 +548,111 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
       }
     };
   }, []);
+
+  // Phone mic: short recordings sent as binary to wake server (OpenWakeWord / Groq on server).
+  useEffect(() => {
+    if (!WAKE_WORD_URL) return;
+
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (ms: number) => {
+      if (cancelled) return;
+      timeoutId = setTimeout(runTick, Math.max(80, ms));
+    };
+
+    const runTick = async () => {
+      timeoutId = null;
+      if (cancelled) return;
+
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN || !isWakeWordConnected) {
+        schedule(500);
+        return;
+      }
+      if (pipelineStateRef.current !== 'idle' || recordingRef.current || wakeScanInProgressRef.current) {
+        schedule(WAKE_SCAN_GAP_MS);
+        return;
+      }
+      if (wakeSnippetGlobalLock) {
+        schedule(250);
+        return;
+      }
+      const waitMs = wakeCooldownUntilRef.current - Date.now();
+      if (waitMs > 0) {
+        schedule(waitMs);
+        return;
+      }
+
+      wakeScanInProgressRef.current = true;
+      wakeSnippetGlobalLock = true;
+      try {
+        const granted = await requestMicPermission();
+        if (!granted || cancelled) return;
+
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+        });
+
+        const snap = new Audio.Recording();
+        const snapOptions: Audio.RecordingOptions = {
+          android: {
+            extension: '.m4a',
+            outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+            audioEncoder: Audio.AndroidAudioEncoder.AAC,
+            sampleRate: 16000,
+            numberOfChannels: 1,
+            bitRate: 128000,
+          },
+          ios: {
+            extension: '.wav',
+            outputFormat: Audio.IOSOutputFormat.LINEARPCM,
+            audioQuality: Audio.IOSAudioQuality.MAX,
+            sampleRate: 16000,
+            numberOfChannels: 1,
+            bitRate: 128000,
+            linearPCMBitDepth: 16,
+            linearPCMIsBigEndian: false,
+            linearPCMIsFloat: false,
+          },
+          web: {
+            mimeType: 'audio/wav',
+            bitsPerSecond: 128000,
+          },
+          isMeteringEnabled: false,
+        };
+
+        await snap.prepareToRecordAsync(snapOptions);
+        await snap.startAsync();
+        await new Promise<void>((resolve) => setTimeout(resolve, WAKE_SCAN_RECORD_MS));
+        await snap.stopAndUnloadAsync();
+        const uri = snap.getURI();
+        if (!uri || cancelled) return;
+
+        const wsSend = wsRef.current;
+        if (!wsSend || wsSend.readyState !== WebSocket.OPEN) return;
+
+        const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+        const buf = Buffer.from(b64, 'base64');
+        const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        wsSend.send(bytes);
+      } catch (e) {
+        console.warn('[PIPELINE] Wake scan failed:', e);
+      } finally {
+        wakeScanInProgressRef.current = false;
+        wakeSnippetGlobalLock = false;
+      }
+      if (!cancelled) schedule(WAKE_SCAN_GAP_MS);
+    };
+
+    schedule(400);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [WAKE_WORD_URL, isWakeWordConnected, requestMicPermission]);
 
   useEffect(() => {
     return () => {

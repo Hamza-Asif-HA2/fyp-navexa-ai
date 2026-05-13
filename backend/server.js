@@ -1,10 +1,13 @@
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const dotenv = require("dotenv");
 const mongoose = require("mongoose");
 
-dotenv.config();
+// Load backend/.env from this file's directory; override so shell/IDE exports
+// (e.g. a stale MONGODB_URI) do not win over the project .env.
+dotenv.config({ path: path.join(__dirname, ".env"), override: true });
 
 const authRoutes = require("./routes/authRoutes");
 const voiceRoutes = require("./routes/voiceRoutes");
