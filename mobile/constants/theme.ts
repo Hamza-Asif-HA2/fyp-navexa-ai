@@ -1,0 +1,36 @@
+export const theme = {
+  colors: {
+    bgPrimary: '#0A0A0F',
+    bgSurface: '#12121A',
+    bgElevated: '#1A1A2E',
+    accentPurple: '#6C63FF',
+    accentCyan: '#00D4FF',
+    accentGlow: 'rgba(108,99,255,0.3)',
+    textPrimary: '#F0F0F5',
+    textMuted: '#7A7A8C',
+    border: 'rgba(108,99,255,0.2)',
+    success: '#00FF9D',
+    error: '#FF4757',
+    cardBg: 'rgba(26,26,46,0.85)',
+  },
+  spacing: {
+    xs: 4,
+    sm: 8,
+    md: 16,
+    lg: 24,
+    xl: 32,
+  },
+  borderRadius: {
+    sm: 8,
+    md: 12,
+    lg: 16,
+    xl: 24,
+    full: 9999,
+  },
+  glassmorphism: {
+    backgroundColor: 'rgba(18,18,26,0.85)',
+    borderWidth: 0.5,
+    borderColor: 'rgba(108,99,255,0.3)',
+    borderRadius: 12,
+  },
+} as const;
