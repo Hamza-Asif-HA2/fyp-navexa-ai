@@ -18,7 +18,9 @@ WebSocket server (default `ws://0.0.0.0:8765`) that detects “Hey Navexa” usi
 
 3. **`.env`** — copy from `.env.example` and set `GROQ_API_KEY` if you want Whisper on clips when OWW does not fire.
 
-4. **Start the server** (uses `.venv` automatically):
+4. **FFmpeg** (recommended): Android wake snippets are **M4A**; the server uses librosa, which needs **ffmpeg** on `PATH` to decode them (e.g. macOS: `brew install ffmpeg`). iOS sends **WAV** and usually works with `soundfile` alone.
+
+5. **Start the server** (uses `.venv` automatically):
 
    ```bash
    cd voice-services/wake_word
@@ -27,6 +29,6 @@ WebSocket server (default `ws://0.0.0.0:8765`) that detects “Hey Navexa” usi
 
    Equivalent: `.venv/bin/python server.py`
 
-5. **Mobile** — `mobile/.env` must include `EXPO_PUBLIC_WAKE_WORD_WS=ws://<lan-ip>:8765` (same Wi‑Fi as the device). Restart Expo after changing any `EXPO_PUBLIC_*` value.
+6. **Mobile** — `mobile/.env` must include `EXPO_PUBLIC_WAKE_WORD_WS=ws://<lan-ip>:8765` (same Wi‑Fi as the device). Restart Expo after changing any `EXPO_PUBLIC_*` value.
 
 See also [`mobile/README.md`](../../mobile/README.md) and [`mobile/.env.example`](../../mobile/.env.example).

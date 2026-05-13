@@ -148,10 +148,38 @@ def clip_max_openwakeword_score(oww_model, samples_int16: np.ndarray) -> float:
     return best
 
 
-def audio_file_to_int16_mono(path: str, target_sr: int = RATE) -> np.ndarray:
-    wav, _sr = librosa.load(path, sr=target_sr, mono=True)
-    wav = np.clip(wav, -1.0, 1.0)
-    return (wav * 32767.0).astype(np.int16)
+def decode_audio_raw_to_int16_mono(raw: bytes, target_sr: int = RATE) -> np.ndarray:
+    """Decode mobile/Expo clips (WAV, M4A/MP4, etc.) to mono int16 @ target_sr."""
+    if not raw or len(raw) < 64:
+        raise ValueError("clip_too_short")
+
+    errors: list[str] = []
+
+    # In-memory WAV (iOS Expo linear PCM)
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        try:
+            wav, _sr = librosa.load(io.BytesIO(raw), sr=target_sr, mono=True)
+            wav = np.clip(wav, -1.0, 1.0)
+            return (wav * 32767.0).astype(np.int16)
+        except Exception as e:
+            errors.append(f"wav_bytesio:{e!s}")
+
+    # Containered formats: librosa/audioread often needs a real suffix (and ffmpeg for m4a).
+    for suffix in (".m4a", ".mp4", ".caf", ".wav"):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            wav, _sr = librosa.load(path, sr=target_sr, mono=True)
+            wav = np.clip(wav, -1.0, 1.0)
+            return (wav * 32767.0).astype(np.int16)
+        except Exception as e:
+            errors.append(f"{suffix}:{e!s}")
+        finally:
+            with suppress(Exception):
+                os.unlink(path)
+
+    raise RuntimeError(" | ".join(errors) if errors else "decode_failed")
 
 
 # OpenWakeWord model (preferred for server mic). Groq can still transcribe binary clips from mobile.
@@ -290,74 +318,77 @@ async def handler(websocket):
             try:
                 # Binary messages: audio file bytes (WAV/M4A/etc. via librosa)
                 if isinstance(message, (bytes, bytearray)):
-                    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
-                        tmp.write(message)
-                        tmp_path = tmp.name
+                    raw = bytes(message)
+                    current_time = time.time()
+                    wav_bytes_raw = raw
+
                     try:
-                        current_time = time.time()
-
-                        with open(tmp_path, "rb") as f:
-                            wav_bytes_raw = f.read()
-
-                        try:
-                            samples = audio_file_to_int16_mono(tmp_path)
-                        except Exception as load_err:
-                            print(f"[WS] Could not decode audio clip: {load_err}")
-                            await websocket.send(json.dumps({"event": "ERROR", "detail": "invalid_audio"}))
-                            continue
-
-                        is_wake = False
-                        wake_score = 0.0
-                        text = ""
-
-                        if model is not None:
-                            wake_score = clip_max_openwakeword_score(model, samples)
-                            if wake_score >= DETECTION_THRESHOLD and (current_time - last_detection_time > COOLDOWN_SECONDS):
-                                is_wake = True
-                                last_detection_time = current_time
-                                display_transcription(f"(openwakeword score={wake_score:.2f})", 0.0, is_wake_word=True)
-
-                        if not is_wake and groq_client is not None:
-                            try:
-                                bio = io.BytesIO(wav_bytes_raw)
-                                bio.seek(0)
-                                transcript = groq_client.audio.transcriptions.create(
-                                    file=("audio.wav", bio, "audio/wav"),
-                                    model="whisper-large-v3-turbo",
-                                    language="en",
-                                )
-                                text = transcript.text.strip()
-                                display_transcription(text, 0.0)
-                                if is_hey_navexa(text):
-                                    if current_time - last_detection_time > COOLDOWN_SECONDS:
-                                        is_wake = True
-                                        last_detection_time = current_time
-                                        display_transcription(text, 0.0, is_wake_word=True)
-                            except Exception as e:
-                                print(f"[WS] Groq transcription error: {e}")
-
-                        energy = float(np.sqrt(np.mean(np.square(samples.astype(np.float32)))))
-
-                        if is_wake:
-                            await notify_clients()
-                            await websocket.send(
-                                json.dumps(
-                                    {
-                                        "event": "TRANSCRIPTION",
-                                        "text": text,
-                                        "wake": True,
-                                        "score": wake_score,
-                                        "energy": energy,
-                                    }
-                                )
+                        samples = decode_audio_raw_to_int16_mono(raw)
+                    except Exception as load_err:
+                        print(f"[WS] Could not decode audio clip ({len(raw)} bytes): {load_err}")
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "event": "ERROR",
+                                    "detail": "invalid_audio",
+                                    "hint": "Install ffmpeg for Android M4A clips; iOS WAV needs soundfile.",
+                                    "bytes": len(raw),
+                                }
                             )
-                        else:
-                            await websocket.send(json.dumps({"event": "NO_DETECTION", "energy": energy}))
-                    finally:
+                        )
+                        continue
+
+                    is_wake = False
+                    wake_score = 0.0
+                    text = ""
+
+                    if model is not None:
+                        wake_score = clip_max_openwakeword_score(model, samples)
+                        if wake_score >= DETECTION_THRESHOLD and (current_time - last_detection_time > COOLDOWN_SECONDS):
+                            is_wake = True
+                            last_detection_time = current_time
+                            display_transcription(f"(openwakeword score={wake_score:.2f})", 0.0, is_wake_word=True)
+
+                    if not is_wake and groq_client is not None:
                         try:
-                            os.unlink(tmp_path)
-                        except Exception:
-                            pass
+                            bio = io.BytesIO(wav_bytes_raw)
+                            bio.seek(0)
+                            if len(wav_bytes_raw) >= 12 and wav_bytes_raw[:4] == b"RIFF" and wav_bytes_raw[8:12] == b"WAVE":
+                                gname, gmime = "audio.wav", "audio/wav"
+                            else:
+                                gname, gmime = "audio.m4a", "audio/mp4"
+                            transcript = groq_client.audio.transcriptions.create(
+                                file=(gname, bio, gmime),
+                                model="whisper-large-v3-turbo",
+                                language="en",
+                            )
+                            text = transcript.text.strip()
+                            display_transcription(text, 0.0)
+                            if is_hey_navexa(text):
+                                if current_time - last_detection_time > COOLDOWN_SECONDS:
+                                    is_wake = True
+                                    last_detection_time = current_time
+                                    display_transcription(text, 0.0, is_wake_word=True)
+                        except Exception as e:
+                            print(f"[WS] Groq transcription error: {e}")
+
+                    energy = float(np.sqrt(np.mean(np.square(samples.astype(np.float32)))))
+
+                    if is_wake:
+                        await notify_clients()
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "event": "TRANSCRIPTION",
+                                    "text": text,
+                                    "wake": True,
+                                    "score": wake_score,
+                                    "energy": energy,
+                                }
+                            )
+                        )
+                    else:
+                        await websocket.send(json.dumps({"event": "NO_DETECTION", "energy": energy}))
                 else:
                     # text messages are informational; echo back
                     print(f"[WS] Text from {client_addr}: {message}")

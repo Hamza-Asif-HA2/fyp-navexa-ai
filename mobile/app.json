@@ -7,14 +7,17 @@
     "icon": "./assets/icon.png",
     "scheme": "navexa",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#0A0A0F"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "NavexaAI connects to the development server on your Wi‑Fi network while you build and test the app."
+      }
     },
     "android": {
       "adaptiveIcon": {

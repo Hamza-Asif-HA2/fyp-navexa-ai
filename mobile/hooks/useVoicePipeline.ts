@@ -635,7 +635,8 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
         const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
         const buf = Buffer.from(b64, 'base64');
-        const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        // Exact byte copy — Buffer may use a pooled ArrayBuffer; slicing by buf.buffer.byteLength corrupts M4A/WAV.
+        const bytes = Uint8Array.from(buf);
         wsSend.send(bytes);
       } catch (e) {
         console.warn('[PIPELINE] Wake scan failed:', e);
