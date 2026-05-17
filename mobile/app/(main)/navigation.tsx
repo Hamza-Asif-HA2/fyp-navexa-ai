@@ -166,7 +166,29 @@ export default function NavigationScreen() {
   const locationWatcherRef = useRef<any>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const navigationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSpokenStepIndexRef = useRef<number>(-1);
   const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const focusNavigationCameraOnUser = useCallback(
+    (duration = 900) => {
+      if (!userLocation || !mapRef.current) return;
+
+      // Match turn-by-turn UX by snapping to user marker with a tighter zoom.
+      mapRef.current.animateCamera(
+        {
+          center: {
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+          },
+          zoom: 17,
+          pitch: is3DMode ? 60 : 45,
+          heading: 0,
+        },
+        { duration }
+      );
+    },
+    [is3DMode, userLocation]
+  );
 
   const { pipelineState, speak } = useVoicePipeline({
     onAction: (intent, action) => {
@@ -277,6 +299,26 @@ export default function NavigationScreen() {
     return `${km.toFixed(1)}km`;
   };
 
+  const buildTtsStepAnnouncement = useCallback((distanceKm: number, instruction: string): string => {
+    const cleanInstruction = String(instruction || 'Continue on route').replace(/\s+/g, ' ').trim();
+
+    if (!Number.isFinite(distanceKm) || distanceKm <= 0) {
+      return cleanInstruction;
+    }
+
+    if (distanceKm < 0.05) {
+      return `Now, ${cleanInstruction}`;
+    }
+
+    if (distanceKm < 1) {
+      const meters = Math.max(10, Math.round((distanceKm * 1000) / 10) * 10);
+      return `In ${meters} meters, ${cleanInstruction}`;
+    }
+
+    const kmValue = distanceKm >= 10 ? distanceKm.toFixed(0) : distanceKm.toFixed(1);
+    return `In ${kmValue} kilometers, ${cleanInstruction}`;
+  }, []);
+
   // Determine traffic status based on duration
   const getTrafficStatus = (expectedSeconds: number, actualSeconds: number): TrafficStatus => {
     const ratio = actualSeconds / expectedSeconds;
@@ -310,9 +352,31 @@ export default function NavigationScreen() {
             : Array.isArray(response)
             ? response
             : [];
-          setAutocompleteResults(results);
+
+          // Normalize API shapes so UI labels are always populated.
+          const normalizedResults: AutocompletePlace[] = results
+            .map((item: any) => {
+              const description = String(item?.description || '').trim();
+              const parts = description.split(',').map((p) => p.trim()).filter(Boolean);
+              const mainText = String(item?.mainText || item?.main_text || parts[0] || description);
+              const secondaryRaw = item?.secondaryText || item?.secondary_text || parts.slice(1).join(', ');
+              const secondaryText = secondaryRaw ? String(secondaryRaw) : undefined;
+              const placeId = String(item?.placeId || item?.place_id || description);
+
+              if (!description) return null;
+
+              return {
+                placeId,
+                description,
+                mainText,
+                secondaryText,
+              } as AutocompletePlace;
+            })
+            .filter(Boolean) as AutocompletePlace[];
+
+          setAutocompleteResults(normalizedResults);
           setShowAutocomplete(true);
-          console.log('[NAVIGATION] Autocomplete results:', results.length);
+          console.log('[NAVIGATION] Autocomplete results:', normalizedResults.length);
         } catch (error) {
           console.error('[NAVIGATION] Autocomplete error:', error);
         }
@@ -338,7 +402,7 @@ export default function NavigationScreen() {
           const geocodeResponse: any = await apiClient.navigation.geocode(address);
           const location = geocodeResponse?.location;
 
-          if (!location?.lat || !location?.lng) {
+          if (location?.lat == null || location?.lng == null) {
             Alert.alert('Invalid destination', 'Could not find destination coordinates');
             return;
           }
@@ -413,21 +477,25 @@ export default function NavigationScreen() {
         setCurrentStepIndex(0);
         setEta(etaText);
         setTotalDistance(distanceText);
-        setRemainingTime(duration);
+        setRemainingTime(duration * 60);
         setNextStepInstruction(nextStep);
+        setDistanceToNext(formatDistance(Number(steps[0]?.distance || distance || 0)));
         setIsNavigating(true);
+        lastSpokenStepIndexRef.current = 0;
 
         // Start trip
-        const tripResponse: any = await apiClient.trips.startTrip(userLocation, destObj);
+        const tripResponse: any = await apiClient.trips.startTrip(
+          {
+            lat: userLocation.latitude,
+            lng: userLocation.longitude,
+          },
+          {
+            lat: destObj.latitude,
+            lng: destObj.longitude,
+            address: destObj.address,
+          }
+        );
         setActiveTripId(tripResponse?.tripId || tripResponse?._id);
-
-        // Animate to show full route
-        if (coordinates.length > 0) {
-          mapRef.current?.fitToCoordinates(coordinates, {
-            edgePadding: { top: 150, right: 50, bottom: 250, left: 50 },
-            animated: true,
-          });
-        }
 
         // Start navigation timer for live ETA updates
         if (navigationIntervalRef.current) {
@@ -437,13 +505,18 @@ export default function NavigationScreen() {
           setRemainingTime((prev) => Math.max(0, prev - 1));
         }, 1000);
 
+        focusNavigationCameraOnUser();
+        const firstStepDistance = Number(steps[0]?.distance || 0);
+        const firstAnnouncement = buildTtsStepAnnouncement(firstStepDistance, nextStep);
+        await speak(`Navigation started. ${firstAnnouncement}`);
+
         console.log('[NAVIGATION] Navigation started with', steps.length, 'steps');
       } catch (error) {
         console.error('[NAVIGATION] Start navigation error:', error);
         Alert.alert('Navigation error', 'Could not calculate route');
       }
     },
-    [userLocation, autocompleteResults]
+    [userLocation, autocompleteResults, focusNavigationCameraOnUser, buildTtsStepAnnouncement, speak]
   );
 
   // Cancel navigation
@@ -461,6 +534,7 @@ export default function NavigationScreen() {
       setEta('');
       setRemainingTime(0);
       setCurrentStepIndex(0);
+      lastSpokenStepIndexRef.current = -1;
       
       if (locationWatcherRef.current) {
         locationWatcherRef.current.remove();
@@ -490,6 +564,7 @@ export default function NavigationScreen() {
       setDestination(null);
       setRouteCoordinates([]);
       setRemainingTime(0);
+      lastSpokenStepIndexRef.current = -1;
       
       if (locationWatcherRef.current) {
         locationWatcherRef.current.remove();
@@ -577,10 +652,16 @@ export default function NavigationScreen() {
         if (currentStep) {
           setNextStepInstruction(currentStep.instruction);
           setDistanceToNext(formatDistance(currentStep.distance));
+
+          if (lastSpokenStepIndexRef.current !== closestStepIndex) {
+            lastSpokenStepIndexRef.current = closestStepIndex;
+            const stepAnnouncement = buildTtsStepAnnouncement(Number(currentStep.distance || 0), currentStep.instruction);
+            speak(stepAnnouncement);
+          }
         }
       }
     }
-  }, [isNavigating, navigationSteps, userLocation, currentStepIndex, getDistance]);
+  }, [isNavigating, navigationSteps, userLocation, currentStepIndex, getDistance, speak, buildTtsStepAnnouncement]);
 
   return (
     <View style={styles.container}>
@@ -737,15 +818,19 @@ export default function NavigationScreen() {
             style={styles.controlButton}
             onPress={() => {
               if (userLocation) {
-                mapRef.current?.animateToRegion(
-                  {
-                    latitude: userLocation.latitude,
-                    longitude: userLocation.longitude,
-                    latitudeDelta: 0.02,
-                    longitudeDelta: 0.02,
-                  },
-                  500
-                );
+                if (isNavigating) {
+                  focusNavigationCameraOnUser(500);
+                } else {
+                  mapRef.current?.animateToRegion(
+                    {
+                      latitude: userLocation.latitude,
+                      longitude: userLocation.longitude,
+                      latitudeDelta: 0.02,
+                      longitudeDelta: 0.02,
+                    },
+                    500
+                  );
+                }
               }
             }}
           >
@@ -821,7 +906,13 @@ export default function NavigationScreen() {
               onChangeText={handleSearchPlace}
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSearchQuery('');
+                      setAutocompleteResults([]);
+                      setShowAutocomplete(false);
+                    }}
+                  >
                 <MaterialCommunityIcons name="close" size={20} color={theme.colors.accentPurple} />
               </TouchableOpacity>
             )}

@@ -6,6 +6,17 @@ const User = require("../models/User");
 
 const router = express.Router();
 
+const normalizeLocation = (point = {}) => {
+	const lat = point.lat ?? point.latitude;
+	const lng = point.lng ?? point.longitude;
+
+	return {
+		lat: Number(lat),
+		lng: Number(lng),
+		address: point.address ? String(point.address) : undefined,
+	};
+};
+
 router.post("/start", protect, async (req, res) => {
 	try {
 		const { origin, destination } = req.body;
@@ -17,10 +28,27 @@ router.post("/start", protect, async (req, res) => {
 			});
 		}
 
+		const normalizedOrigin = normalizeLocation(origin);
+		const normalizedDestination = normalizeLocation(destination);
+
+		if (!Number.isFinite(normalizedOrigin.lat) || !Number.isFinite(normalizedOrigin.lng)) {
+			return res.status(400).json({
+				success: false,
+				message: "Origin coordinates are required",
+			});
+		}
+
+		if (!Number.isFinite(normalizedDestination.lat) || !Number.isFinite(normalizedDestination.lng)) {
+			return res.status(400).json({
+				success: false,
+				message: "Destination coordinates are required",
+			});
+		}
+
 		const trip = await Trip.create({
 			userId: req.user._id,
-			origin,
-			destination,
+			origin: normalizedOrigin,
+			destination: normalizedDestination,
 			status: "active",
 		});
 
