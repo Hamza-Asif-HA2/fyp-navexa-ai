@@ -182,14 +182,14 @@ export const navigationApi = {
 
 export const mediaApi = {
   getSpotifyAuthUrl() {
-    const appRedirectUri = typeof window !== 'undefined' ? `${window.location.origin}/spotify/callback` : undefined;
+    const appRedirectUri = 'navexa://spotify/callback';
     return api.get('/api/media/spotify/auth-url', { params: { appRedirectUri } }).then((r) => ({
       ...r.data,
       authUrl: r.data?.authUrl || r.data?.url,
     }));
   },
-  exchangeSpotifyCode(code: string, redirectUri?: string) {
-    return api.post('/api/media/spotify/exchange', { code, redirectUri }).then((r) => r.data);
+  exchangeSpotifyCode(code: string) {
+    return api.post('/api/media/spotify/exchange', { code }).then((r) => r.data);
   },
   loadCurrentTrack() {
     return api.get('/api/media/now-playing').then((r) => r.data);

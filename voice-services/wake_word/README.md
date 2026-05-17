@@ -18,7 +18,7 @@ WebSocket server (default `ws://0.0.0.0:8765`) that detects “Hey Navexa” usi
 
 3. **`.env`** — copy from `.env.example` and set `GROQ_API_KEY` if you want Whisper on clips when OWW does not fire.
 
-4. **FFmpeg** (recommended): Android wake snippets are **M4A**; the server uses librosa, which needs **ffmpeg** on `PATH` to decode them (e.g. macOS: `brew install ffmpeg`). iOS sends **WAV** and usually works with `soundfile` alone.
+4. **FFmpeg**: Android wake snippets are **M4A**; install the Python dependency set in `requirements.txt` so `imageio-ffmpeg` can supply ffmpeg for `librosa` decoding. iOS sends **WAV** and usually works with `soundfile` alone.
 
 5. **Start the server** (uses `.venv` automatically):
 

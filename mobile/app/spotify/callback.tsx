@@ -34,7 +34,7 @@ export default function SpotifyCallbackScreen() {
           return;
         }
 
-        await apiClient.media.exchangeSpotifyCode(code, 'navexa://spotify/callback');
+        await apiClient.media.exchangeSpotifyCode(code);
         setMessage('Spotify connected successfully');
         setTimeout(() => {
           router.replace('/(main)/entertainment');

@@ -38,7 +38,7 @@ const WAKE_WORD_URL = process.env.EXPO_PUBLIC_WAKE_WORD_WS ?? '';
 const SILENCE_DB_THRESHOLD = -40;
 const SILENCE_WINDOW_MS = 1500;
 const SILENCE_CHECK_MS = 500;
-const WAKE_SCAN_RECORD_MS = 620;
+const WAKE_SCAN_RECORD_MS = 1500;
 const WAKE_SCAN_GAP_MS = 400;
 const WAKE_COOLDOWN_MS = 2200;
 
@@ -81,6 +81,9 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
   const pipelineStateRef = useRef<PipelineState>('idle');
   const wakeScanInProgressRef = useRef(false);
   const wakeCooldownUntilRef = useRef(0);
+
+  // FIX: track the active wake scan recording so it can be stopped before startListening
+  const wakeScanRecordingRef = useRef<Audio.Recording | null>(null);
 
   useEffect(() => {
     pipelineStateRef.current = pipelineState;
@@ -158,7 +161,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
       const text = String(result?.transcript ?? result?.text ?? '').trim();
       console.log('[PIPELINE] Transcription result length:', text.length);
       if (!text) return null;
-      setTranscript(text); // Update UI with transcribed text
+      setTranscript(text);
       return text;
     } catch (error) {
       console.error('[PIPELINE] Transcription error:', error);
@@ -178,7 +181,6 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
       console.log('[PIPELINE] RAW API RESPONSE:', JSON.stringify(result, null, 2));
       console.log('[PIPELINE] RAW API RESPONSE TYPE:', typeof result);
 
-      // Handle case where entire response is stringified JSON
       if (typeof result === 'string') {
         console.log('[PIPELINE] Response is a string, attempting to parse');
         try {
@@ -191,14 +193,13 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
       const rawText = result?.text ?? result?.response ?? result?.message ?? '';
       console.log('[PIPELINE] RAW TEXT EXTRACTED:', rawText, 'TYPE:', typeof rawText);
-      
-      // If rawText is an object, extract the actual text
+
       let extractedText = rawText;
       if (typeof rawText === 'object' && rawText !== null) {
         extractedText = rawText.text || rawText.response || rawText.message || '';
         console.log('[PIPELINE] Extracted from object:', extractedText);
       }
-      
+
       const text = normalizeModelText(extractedText);
       console.log('[PIPELINE] TEXT AFTER NORMALIZATION:', text);
       const intent = (result?.intent as string | undefined) ?? null;
@@ -290,8 +291,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
     async (audioUri: string): Promise<void> => {
       try {
         console.log('[PIPELINE] runPipeline start with audio:', audioUri);
-        
-        // Quick transcription for live feedback
+
         console.log('[PIPELINE] Starting quick transcription for feedback');
         const quickTranscript = await transcribeAudio(audioUri);
         if (quickTranscript) {
@@ -322,15 +322,14 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
         const { text, intent, action } = await processWithAI(nextTranscript, context);
         console.log('[PIPELINE] After processWithAI, text is:', text);
         console.log('[PIPELINE] text type:', typeof text);
-        
-        // Ensure we extract just the string text, not the full object
+
         let cleanText = '';
         if (typeof text === 'string') {
           cleanText = text;
         } else if (text && typeof text === 'object') {
           cleanText = (text as any)?.text || (text as any)?.response || (text as any)?.message || '';
         }
-        
+
         const spokenText = normalizeModelText(cleanText) || cleanText;
         console.log('[PIPELINE] Final spokenText for bubble:', spokenText);
         console.log('[PIPELINE] spokenText type:', typeof spokenText);
@@ -403,6 +402,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
       });
 
       const recording = new Audio.Recording();
@@ -495,13 +495,35 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
         console.log('[PIPELINE] Wake-word websocket connected');
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         console.log('[PIPELINE] Wake-word message received:', event.data);
         try {
           const payload = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-          if (payload?.event === 'WAKE_WORD_DETECTED' || payload?.wake === true) {
+
+          // FIX: only trigger on the broadcast event, not on TRANSCRIPTION (which now has wake=false).
+          // This prevents startListening from being called twice per detection.
+          if (payload?.event === 'WAKE_WORD_DETECTED') {
             console.log('[PIPELINE] WAKE_WORD_DETECTED parsed from JSON payload');
             wakeCooldownUntilRef.current = Date.now() + WAKE_COOLDOWN_MS;
+
+            // FIX: stop the active wake scan recording before starting the listen recording.
+            // expo-av only allows one active Recording at a time.
+            const activeSnap = wakeScanRecordingRef.current;
+            if (activeSnap) {
+              wakeScanRecordingRef.current = null;
+              try {
+                const status = await activeSnap.getStatusAsync();
+                if (status.isRecording) {
+                  await activeSnap.stopAndUnloadAsync();
+                }
+              } catch (_) {
+                // ignore — recording may have already ended
+              }
+            }
+
+            // Small gap to let expo-av release the microphone
+            await new Promise<void>((r) => setTimeout(r, 150));
+
             startListeningRef.current();
             return;
           }
@@ -549,7 +571,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
     };
   }, []);
 
-  // Phone mic: short recordings sent as binary to wake server (OpenWakeWord / Groq on server).
+  // Phone mic: continuously record short snippets and send to wake word server
   useEffect(() => {
     if (!WAKE_WORD_URL) return;
 
@@ -567,6 +589,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN || !isWakeWordConnected) {
+        console.log('[PIPELINE] WebSocket not ready, rescheduling wake scan');
         schedule(500);
         return;
       }
@@ -580,6 +603,7 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
       }
       const waitMs = wakeCooldownUntilRef.current - Date.now();
       if (waitMs > 0) {
+        console.log('[PIPELINE] In cooldown, waiting', waitMs, 'ms');
         schedule(waitMs);
         return;
       }
@@ -593,6 +617,8 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: true,
           playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
         });
 
         const snap = new Audio.Recording();
@@ -625,21 +651,39 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
         await snap.prepareToRecordAsync(snapOptions);
         await snap.startAsync();
+        // FIX: store reference so onmessage can stop it when WAKE_WORD_DETECTED fires mid-scan
+        wakeScanRecordingRef.current = snap;
+        console.log('[PIPELINE] Wake scan recording started');
+
         await new Promise<void>((resolve) => setTimeout(resolve, WAKE_SCAN_RECORD_MS));
-        await snap.stopAndUnloadAsync();
+
+        // Only stop if it hasn't already been stopped by the wake word handler
+        if (wakeScanRecordingRef.current === snap) {
+          await snap.stopAndUnloadAsync();
+          wakeScanRecordingRef.current = null;
+        }
+
         const uri = snap.getURI();
+        console.log('[PIPELINE] Wake scan recording stopped, uri:', uri);
+
         if (!uri || cancelled) return;
 
         const wsSend = wsRef.current;
-        if (!wsSend || wsSend.readyState !== WebSocket.OPEN) return;
+        if (!wsSend || wsSend.readyState !== WebSocket.OPEN) {
+          console.log('[PIPELINE] WebSocket no longer open, skipping send');
+          return;
+        }
 
         const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
         const buf = Buffer.from(b64, 'base64');
-        // Exact byte copy — Buffer may use a pooled ArrayBuffer; slicing by buf.buffer.byteLength corrupts M4A/WAV.
         const bytes = Uint8Array.from(buf);
+
+        console.log('[PIPELINE] Sending', bytes.length, 'bytes to wake word server');
         wsSend.send(bytes);
       } catch (e) {
         console.warn('[PIPELINE] Wake scan failed:', e);
+        // FIX: clear the ref if the recording failed mid-way
+        wakeScanRecordingRef.current = null;
       } finally {
         wakeScanInProgressRef.current = false;
         wakeSnippetGlobalLock = false;

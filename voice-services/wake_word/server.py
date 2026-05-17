@@ -16,6 +16,13 @@ import wave
 import tempfile
 
 try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
+
+import subprocess
+
+try:
     from groq import Groq
     GROQ_AVAILABLE = True
 except Exception:
@@ -48,6 +55,26 @@ except Exception:
 
 load_dotenv()
 
+
+def configure_audioread_backend():
+    # Make ffmpeg available to librosa/audioread for Android M4A clips.
+    if imageio_ffmpeg is None:
+        print("[AUDIO] imageio_ffmpeg is not installed; M4A clips may fail to decode")
+        return
+
+    try:
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        path_parts = os.environ.get("PATH", "").split(os.pathsep)
+        if ffmpeg_dir not in path_parts:
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+        print(f"[AUDIO] ffmpeg backend ready: {ffmpeg_path}")
+    except Exception as exc:
+        print(f"[AUDIO] Failed to initialize ffmpeg backend: {exc}")
+
+
+configure_audioread_backend()
+
 # Groq client for Whisper transcription
 groq_client = None
 if GROQ_AVAILABLE:
@@ -68,12 +95,12 @@ DETECTION_THRESHOLD = float(os.getenv("DETECTION_THRESHOLD", "0.5"))
 WEBSOCKET_PORT = int(os.getenv("WEBSOCKET_PORT", "8765"))
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "2"))
 ENERGY_THRESHOLD = float(os.getenv("ENERGY_THRESHOLD", "500"))
-BUFFER_DURATION = float(os.getenv("BUFFER_DURATION", "1.5"))  # Seconds
+BUFFER_DURATION = float(os.getenv("BUFFER_DURATION", "1.2"))  # FIX: reduced from 1.5 so hold timer always covers it
 
 # Auto-calibration and debug options
 AUTO_CALIBRATE = os.getenv("AUTO_CALIBRATE", "true").lower() in ("1", "true", "yes")
 CALIBRATION_SECONDS = float(os.getenv("CALIBRATION_SECONDS", "1.5"))
-CALIBRATION_MULTIPLIER = float(os.getenv("CALIBRATION_MULTIPLIER", "3.0"))
+CALIBRATION_MULTIPLIER = float(os.getenv("CALIBRATION_MULTIPLIER", "1.5"))  # FIX: reduced from 3.0 — 3x was too aggressive
 DEBUG_FORCE_TRANSCRIBE = os.getenv("DEBUG_FORCE_TRANSCRIBE", "false").lower() in ("1", "true", "yes")
 
 CHUNK = 1280
@@ -162,7 +189,8 @@ def decode_audio_raw_to_int16_mono(raw: bytes, target_sr: int = RATE) -> np.ndar
             wav = np.clip(wav, -1.0, 1.0)
             return (wav * 32767.0).astype(np.int16)
         except Exception as e:
-            errors.append(f"wav_bytesio:{e!s}")
+            errors.append(f"wav_bytesio:{type(e).__name__}:{e!s}")
+            print(f"[AUDIO] WAV BytesIO decode failed: {errors[-1]}")
 
     # Containered formats: librosa/audioread often needs a real suffix (and ffmpeg for m4a).
     for suffix in (".m4a", ".mp4", ".caf", ".wav"):
@@ -174,12 +202,59 @@ def decode_audio_raw_to_int16_mono(raw: bytes, target_sr: int = RATE) -> np.ndar
             wav = np.clip(wav, -1.0, 1.0)
             return (wav * 32767.0).astype(np.int16)
         except Exception as e:
-            errors.append(f"{suffix}:{e!s}")
+            errors.append(f"{suffix}:{type(e).__name__}:{e!s}")
+            print(f"[AUDIO] librosa {suffix} decode failed: {errors[-1]}")
         finally:
             with suppress(Exception):
                 os.unlink(path)
 
-    raise RuntimeError(" | ".join(errors) if errors else "decode_failed")
+    # Direct ffmpeg transcoding fallback (handles M4A when librosa's audioread fails)
+    if imageio_ffmpeg is not None:
+        try:
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+            fd_in, path_in = tempfile.mkstemp(suffix=".m4a")
+            fd_out, path_out = tempfile.mkstemp(suffix=".wav")
+            try:
+                with os.fdopen(fd_in, "wb") as f:
+                    f.write(raw)
+
+                cmd = [
+                    ffmpeg_path,
+                    "-y",
+                    "-i", path_in,
+                    "-ac", "1",
+                    "-ar", str(target_sr),
+                    path_out,
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                if result.returncode == 0:
+                    wav, _sr = librosa.load(path_out, sr=target_sr, mono=True)
+                    wav = np.clip(wav, -1.0, 1.0)
+                    print(f"[AUDIO] ffmpeg transcode succeeded")
+                    return (wav * 32767.0).astype(np.int16)
+                else:
+                    errors.append(f"ffmpeg:{result.returncode}:{result.stderr[:200]}")
+                    print(f"[AUDIO] ffmpeg transcode failed: {errors[-1]}")
+            finally:
+                with suppress(Exception):
+                    os.unlink(path_in)
+                with suppress(Exception):
+                    os.unlink(path_out)
+        except Exception as e:
+            errors.append(f"ffmpeg_fallback:{type(e).__name__}:{e!s}")
+            print(f"[AUDIO] ffmpeg fallback error: {errors[-1]}")
+
+    error_summary = " | ".join(errors) if errors else "decode_failed"
+    print(f"[AUDIO] All decode paths exhausted: {error_summary}")
+    raise RuntimeError(error_summary)
 
 
 # OpenWakeWord model (preferred for server mic). Groq can still transcribe binary clips from mobile.
@@ -376,12 +451,14 @@ async def handler(websocket):
 
                     if is_wake:
                         await notify_clients()
+                        # FIX: wake=False so mobile doesn't fire startListening a second time.
+                        # notify_clients() already broadcasts WAKE_WORD_DETECTED to all clients.
                         await websocket.send(
                             json.dumps(
                                 {
                                     "event": "TRANSCRIPTION",
                                     "text": text,
-                                    "wake": True,
+                                    "wake": False,
                                     "score": wake_score,
                                     "energy": energy,
                                 }
@@ -415,9 +492,14 @@ def audio_loop(loop):
             continue
 
     audio_buffer = np.array([], dtype=np.int16)
-    buffer_duration = 0
+    buffer_duration = 0.0
     chunk_count = 0
     debug_interval = 10  # Print debug every 10 chunks
+
+    # FIX: hold timer — keeps buffering for HOLD_SECONDS after energy drops below threshold.
+    # Set to BUFFER_DURATION + 0.4 so the hold always outlasts the buffer target.
+    last_energy_above_threshold = 0.0
+    HOLD_SECONDS = BUFFER_DURATION + 0.4
 
     while True:
         try:
@@ -432,29 +514,36 @@ def audio_loop(loop):
             energy = float(np.sqrt(np.mean(np.square(audio_data.astype(np.float32)))))
             chunk_count += 1
 
-            # Prefer OpenWakeWord on the server microphone when the model is loaded
+            # Run OWW prediction — logs score but doesn't block Groq path
+            oww_score = 0.0
             if model is not None:
                 try:
                     preds = model.predict(audio_data)
-                    score = max_prediction_score(preds)
+                    oww_score = max_prediction_score(preds)
                 except Exception as pred_err:
                     print(f"[OWW] predict error: {pred_err}")
-                    score = 0.0
+
                 if chunk_count % debug_interval == 0:
-                    print(f"[DEBUG][OWW] score={score:.3f} thr={DETECTION_THRESHOLD} energy={energy:.1f}")
-                if score >= DETECTION_THRESHOLD and (current_time - last_detection_time > COOLDOWN_SECONDS):
-                    display_transcription(f"(openwakeword score={score:.2f})", energy, is_wake_word=True)
+                    print(f"[DEBUG][OWW] score={oww_score:.3f} thr={DETECTION_THRESHOLD} energy={energy:.1f}")
+
+                if oww_score >= DETECTION_THRESHOLD and (current_time - last_detection_time > COOLDOWN_SECONDS):
+                    display_transcription(f"(openwakeword score={oww_score:.2f})", energy, is_wake_word=True)
                     last_detection_time = current_time
                     asyncio.run_coroutine_threadsafe(notify_clients(), loop)
-                continue
+                    continue  # OWW fired — skip Groq this round
 
-            # Groq buffering path when no OpenWakeWord model
+            # Fall through to Groq buffering (runs whether OWW model is loaded or not)
             if chunk_count % debug_interval == 0:
                 buffer_status = f"buffering ({buffer_duration:.1f}s)" if len(audio_buffer) > 0 else "idle"
                 print(f"[DEBUG] Energy: {energy:8.1f} | Threshold: {ENERGY_THRESHOLD} | Status: {buffer_status}")
 
-            # Only buffer audio if above energy threshold or force-transcribe enabled
+            # Reset hold timer whenever energy crosses threshold
             if energy > ENERGY_THRESHOLD or DEBUG_FORCE_TRANSCRIBE:
+                last_energy_above_threshold = current_time
+
+            still_in_hold = (current_time - last_energy_above_threshold) < HOLD_SECONDS
+
+            if still_in_hold or DEBUG_FORCE_TRANSCRIBE:
                 audio_buffer = np.concatenate([audio_buffer, audio_data])
                 buffer_duration += len(audio_data) / RATE
                 if DEBUG_FORCE_TRANSCRIBE:
@@ -499,19 +588,24 @@ def audio_loop(loop):
                         except Exception as transcribe_error:
                             print(f"  ↳ [TRANSCRIPTION_ERROR] {type(transcribe_error).__name__}: {transcribe_error}")
 
-                        # Reset buffer
+                        # Reset buffer after transcription
                         audio_buffer = np.array([], dtype=np.int16)
-                        buffer_duration = 0
+                        buffer_duration = 0.0
+                        last_energy_above_threshold = 0.0
 
                     except Exception as e:
                         print(f"[ERROR] Transcription failed: {e}")
                         audio_buffer = np.array([], dtype=np.int16)
-                        buffer_duration = 0
+                        buffer_duration = 0.0
+                        last_energy_above_threshold = 0.0
             else:
-                # Reset buffer when energy drops below threshold
+                # Hold expired — discard buffer
                 if len(audio_buffer) > 0:
+                    if buffer_duration >= 0.3:
+                        print(f"  ↳ [DISCARDING] {buffer_duration:.2f}s (energy dropped, no transcription)")
                     audio_buffer = np.array([], dtype=np.int16)
-                    buffer_duration = 0
+                    buffer_duration = 0.0
+                    last_energy_above_threshold = 0.0
 
         except Exception as e:
             print(f"[ERROR] Audio loop: {e}")

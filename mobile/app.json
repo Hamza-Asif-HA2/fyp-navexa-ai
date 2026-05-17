@@ -7,7 +7,6 @@
     "icon": "./assets/icon.png",
     "scheme": "navexa",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -28,10 +27,22 @@
         "RECORD_AUDIO",
         "ACCESS_FINE_LOCATION",
         "FOREGROUND_SERVICE",
-        "INTERNET"
+        "INTERNET",
+        "RECORD_AUDIO",
+        "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE",
+        "INTERNET",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCW1IlrJdztBTFVKNqWQWuFNVaAHTpLCJg"
+        }
+      },
+      "package": "com.anonymous.navexaai"
     },
     "web": {
       "favicon": "./assets/favicon.png"

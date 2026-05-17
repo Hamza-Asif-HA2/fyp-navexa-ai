@@ -11,7 +11,7 @@ const SPOTIFY_BASE_URL = "https://api.spotify.com/v1";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize";
 const DEFAULT_SPOTIFY_APP_REDIRECT_URI = "navexa://spotify/callback";
-const DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI = "http://localhost:5000/api/media/spotify/callback";
+const DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI = "http://192.168.100.116:5000/api/media/spotify/callback";
 
 /**
  * Helper: Get valid Spotify access token, refresh if needed
@@ -92,9 +92,33 @@ const buildAppRedirect = (targetUri, query = {}) => {
 	return suffix ? `${redirectTarget}${redirectTarget.includes("?") ? "&" : "?"}${suffix}` : redirectTarget;
 };
 
-const resolveSpotifyRedirectUri = () => {
+const resolveSpotifyRedirectUri = (requestedRedirectUri) => {
 	const configuredRedirectUri = process.env.SPOTIFY_REDIRECT_URI;
-	return configuredRedirectUri || DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI;
+	const redirectUri = String(requestedRedirectUri || configuredRedirectUri || DEFAULT_SPOTIFY_APP_REDIRECT_URI).trim();
+
+	if (
+		!redirectUri ||
+		redirectUri.startsWith("undefined") ||
+		redirectUri.startsWith("null") ||
+		redirectUri.includes("localhost") ||
+		redirectUri.includes("127.0.0.1")
+	) {
+		return configuredRedirectUri && !configuredRedirectUri.includes("localhost")
+			? configuredRedirectUri
+			: DEFAULT_SPOTIFY_APP_REDIRECT_URI;
+	}
+
+	return redirectUri;
+};
+
+const resolveAppRedirectUri = (requestedAppRedirectUri) => {
+	const appRedirectUri = String(requestedAppRedirectUri || "").trim();
+
+	if (!appRedirectUri || appRedirectUri === "undefined" || appRedirectUri === "null") {
+		return DEFAULT_SPOTIFY_APP_REDIRECT_URI;
+	}
+
+	return appRedirectUri;
 };
 
 const persistSpotifyTokens = async (userId, tokens = {}) => {
@@ -116,7 +140,7 @@ router.get("/spotify/auth-url", protect, async (req, res) => {
 	try {
 		const clientId = process.env.SPOTIFY_CLIENT_ID;
 		const redirectUri = resolveSpotifyRedirectUri();
-		const appRedirectUri = String(req.query?.appRedirectUri || DEFAULT_SPOTIFY_APP_REDIRECT_URI);
+		const appRedirectUri = resolveAppRedirectUri(req.query?.appRedirectUri);
 		const scopes = [
 			"user-read-private",
 			"user-read-email",
@@ -147,6 +171,71 @@ router.get("/spotify/auth-url", protect, async (req, res) => {
 		return res.status(500).json({
 			success: false,
 			message: "Failed to build authorization URL",
+		});
+	}
+});
+
+/**
+ * POST /api/media/spotify/exchange
+ * Exchange an authorization code returned to the app for Spotify tokens.
+ */
+router.post("/spotify/exchange", protect, async (req, res) => {
+	try {
+		const { code, redirectUri } = req.body;
+
+		if (!code) {
+			return res.status(400).json({
+				success: false,
+				message: "code is required",
+			});
+		}
+
+		const clientId = process.env.SPOTIFY_CLIENT_ID;
+		const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+		// IMPORTANT: Always use the web callback URI for Spotify's token exchange,
+		// not custom app redirect URIs. Spotify only accepts http/https URIs.
+		const resolvedRedirectUri = process.env.SPOTIFY_REDIRECT_URI || DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI;
+
+		if (!clientId || !clientSecret) {
+			return res.status(503).json({
+				success: false,
+				message: "Spotify OAuth not configured",
+			});
+		}
+
+		const body = new URLSearchParams({
+			grant_type: "authorization_code",
+			code: String(code),
+			redirect_uri: resolvedRedirectUri,
+			client_id: clientId,
+			client_secret: clientSecret,
+		});
+
+		const tokenResponse = await axios.post(SPOTIFY_TOKEN_URL, body, {
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			timeout: 10000,
+		});
+
+		if (!tokenResponse.data.access_token) {
+			return res.status(500).json({
+				success: false,
+				message: "Failed to exchange Spotify code",
+			});
+		}
+
+		await persistSpotifyTokens(req.user._id, tokenResponse.data);
+
+		return res.status(200).json({
+			success: true,
+			connected: true,
+		});
+	} catch (error) {
+		const spotifyError = error.response?.data || error.message;
+		console.error("[MEDIA] spotify exchange error:", JSON.stringify(spotifyError, null, 2));
+		return res.status(500).json({
+			success: false,
+			message: "Failed to exchange Spotify code",
+			error: spotifyError,
 		});
 	}
 });
