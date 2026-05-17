@@ -43,9 +43,11 @@ export function MiniPlayer({ currentTrack, isPlaying, onTogglePlayPause }: Props
         </View>
       </View>
 
-      <TouchableOpacity onPress={onTogglePlayPause} style={styles.playButton} activeOpacity={0.8}>
-        <MaterialCommunityIcons name={isPlaying ? 'pause' : 'play'} size={20} color={theme.colors.textPrimary} />
-      </TouchableOpacity>
+      <View style={styles.playButtonWrapper}>
+        <TouchableOpacity onPress={onTogglePlayPause} activeOpacity={0.7}>
+          <MaterialCommunityIcons name={isPlaying ? 'pause' : 'play'} size={28} color="white" />
+        </TouchableOpacity>
+      </View>
     </TouchableOpacity>
   );
 }
@@ -99,12 +101,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
-  playButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+  playButtonWrapper: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: theme.colors.accentPurple,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: theme.colors.accentPurple,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
   },
 });

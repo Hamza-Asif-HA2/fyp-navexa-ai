@@ -16,6 +16,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
+import { AxiosError } from 'axios';
 import { theme } from '../../constants/theme';
 import { apiClient } from '../../services/api';
 
@@ -72,32 +73,6 @@ function ProgressBar({ position, duration }: { position: number; duration: numbe
   );
 }
 
-function VolumeControl({ value, onChange }: { value: number; onChange: (level: number) => void }) {
-  const handlePress = (event: any) => {
-    const x = event.nativeEvent.locationX;
-    const trackWidth = (event.currentTarget as any).offsetWidth || SCREEN_WIDTH - 80;
-    const nextVolume = Math.max(0, Math.min(100, Math.round((x / trackWidth) * 100)));
-    onChange(nextVolume);
-  };
-
-  const safeValue = Math.max(0, Math.min(100, value));
-
-  return (
-    <View style={styles.volumeWrap}>
-      <MaterialCommunityIcons name="volume-high" size={18} color={theme.colors.textMuted} />
-      <TouchableOpacity 
-        style={styles.volumeTrack}
-        activeOpacity={1}
-        onPress={handlePress}
-      >
-        <View style={[styles.volumeFill, { width: `${safeValue}%` }]} />
-        <View style={[styles.volumeThumb, { left: `${safeValue}%`, marginLeft: -8 }]} />
-      </TouchableOpacity>
-      <Text style={styles.volumeValue}>{Math.round(safeValue)}%</Text>
-    </View>
-  );
-}
-
 export default function EntertainmentScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
@@ -107,13 +82,13 @@ export default function EntertainmentScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolumeState] = useState(65);
   const [recentTracks, setRecentTracks] = useState<SpotifyTrack[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [searchResults, setSearchResults] = useState<SpotifyTrack[]>([]);
   const [activeTab, setActiveTab] = useState<'recent' | 'playlists' | 'search'>('recent');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isTogglingPlayback, setIsTogglingPlayback] = useState(false);
 
   const pulse = useRef(new Animated.Value(0)).current;
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -134,7 +109,6 @@ export default function EntertainmentScreen() {
   const loadCurrentTrack = useCallback(async () => {
     try {
       const response: any = await apiClient.media.loadCurrentTrack();
-      console.log('[ENTERTAINMENT] Current track response:', response);
       setIsConnected(Boolean(response?.isConnected));
       if (response?.track) {
         setCurrentTrack(response.track);
@@ -254,13 +228,25 @@ export default function EntertainmentScreen() {
   );
 
   const togglePlayPause = useCallback(async () => {
+    if (isTogglingPlayback) return;
+
     try {
+      setIsTogglingPlayback(true);
       await apiClient.media.togglePlayPause(isPlaying);
       setIsPlaying((prev) => !prev);
     } catch (error) {
-      console.error('[ENTERTAINMENT] togglePlayPause failed:', error);
+      const status = (error as AxiosError)?.response?.status;
+      if (status === 502) {
+        console.warn('[ENTERTAINMENT] togglePlayPause transient 502');
+        Alert.alert('Spotify busy', 'Playback command failed temporarily. Please try again in a moment.');
+      } else {
+        console.error('[ENTERTAINMENT] togglePlayPause failed:', error);
+      }
+      await loadCurrentTrack();
+    } finally {
+      setIsTogglingPlayback(false);
     }
-  }, [isPlaying]);
+  }, [isPlaying, isTogglingPlayback, loadCurrentTrack]);
 
   const skipNext = useCallback(async () => {
     try {
@@ -279,18 +265,6 @@ export default function EntertainmentScreen() {
       console.error('[ENTERTAINMENT] skipPrev failed:', error);
     }
   }, [loadCurrentTrack]);
-
-  const setVolume = useCallback(async (level: number) => {
-    const nextVolume = Math.max(0, Math.min(100, level));
-    console.log('[ENTERTAINMENT] Setting volume to:', nextVolume);
-    setVolumeState(nextVolume);
-    try {
-      await apiClient.media.setVolume(nextVolume);
-      console.log('[ENTERTAINMENT] Volume set successfully');
-    } catch (error) {
-      console.error('[ENTERTAINMENT] setVolume failed:', error);
-    }
-  }, []);
 
   const searchSpotify = useCallback(async (query: string) => {
     setSearchQuery(query);
@@ -339,17 +313,7 @@ export default function EntertainmentScreen() {
     loadCurrentTrack();
     loadPlaylists();
     loadRecentTracks();
-
-    // Set up polling to refresh current track every 3 seconds
-    pollTimerRef.current = setInterval(() => {
-      loadCurrentTrack();
-    }, 3000);
-
-    return () => {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
-      }
-    };
+    return undefined;
   }, [loadCurrentTrack, loadPlaylists, loadRecentTracks]);
 
   useEffect(() => {
@@ -362,7 +326,11 @@ export default function EntertainmentScreen() {
   useFocusEffect(
     useCallback(() => {
       loadCurrentTrack();
-      pollTimerRef.current = setInterval(loadCurrentTrack, 5000);
+
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+      }
+      pollTimerRef.current = setInterval(loadCurrentTrack, 3000);
 
       return () => {
         if (pollTimerRef.current) {
@@ -444,7 +412,7 @@ export default function EntertainmentScreen() {
                   <Image source={{ uri: albumArt }} style={styles.largeAlbumArt} />
                 ) : (
                   <View style={styles.albumArtPlaceholder}>
-                    <MaterialCommunityIcons name="music-note-multiple" size={64} color={theme.colors.accentPurple} />
+                    <MaterialCommunityIcons name="music" size={64} color={theme.colors.accentPurple} />
                   </View>
                 )}
               </View>
@@ -468,11 +436,16 @@ export default function EntertainmentScreen() {
                   <MaterialCommunityIcons name="skip-previous" size={28} color={theme.colors.textPrimary} />
                 </TouchableOpacity>
 
-                <TouchableOpacity onPress={togglePlayPause} style={styles.playPauseBtnLarge} activeOpacity={0.7}>
+                <TouchableOpacity
+                  onPress={togglePlayPause}
+                  style={[styles.playPauseBtnLarge, isTogglingPlayback && styles.playPauseBtnDisabled]}
+                  activeOpacity={0.2}
+                  disabled={isTogglingPlayback}
+                >
                   <MaterialCommunityIcons 
                     name={isPlaying ? 'pause-circle' : 'play-circle'} 
                     size={60} 
-                    color={theme.colors.accentPurple} 
+                    color={theme.colors.textPrimary} 
                   />
                 </TouchableOpacity>
 
@@ -481,10 +454,7 @@ export default function EntertainmentScreen() {
                 </TouchableOpacity>
               </View>
 
-              {/* Volume Control */}
-              <View style={styles.volumeSection}>
-                <VolumeControl value={volume} onChange={setVolume} />
-              </View>
+
             </View>
 
             {/* Search Bar */}
@@ -702,43 +672,8 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 10,
   },
-  volumeSection: {
-    paddingVertical: 12,
-  },
-  volumeWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  volumeTrack: {
-    flex: 1,
-    height: 24,
-    justifyContent: 'center',
-  },
-  volumeFill: {
-    height: 5,
-    borderRadius: 2.5,
-    backgroundColor: theme.colors.accentPurple,
-  },
-  volumeThumb: {
-    position: 'absolute',
-    top: 5,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: theme.colors.accentPurple,
-    shadowColor: theme.colors.accentPurple,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.5,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  volumeValue: {
-    color: theme.colors.textMuted,
-    fontSize: 13,
-    fontWeight: '600',
-    width: 32,
-    textAlign: 'right',
+  playPauseBtnDisabled: {
+    opacity: 0.6,
   },
   searchBarContainer: {
     marginBottom: 16,

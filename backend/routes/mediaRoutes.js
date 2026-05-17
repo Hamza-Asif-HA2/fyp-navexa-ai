@@ -431,19 +431,19 @@ router.get("/search", protect, async (req, res) => {
 		try {
 			const token = await getValidToken(req.user._id);
 			const searchQuery = String(q).trim();
-			console.log("[MEDIA] Searching Spotify for:", searchQuery);
 			
-			const response = await axios.get(`${SPOTIFY_BASE_URL}/search`, {
-				params: {
-					q: searchQuery,
-					type: 'track',
-					limit: 20,
-				},
+			// Construct query string
+			const encoded_q = encodeURIComponent(searchQuery);
+			const queryString = `q=${encoded_q}&type=track&limit=10`;
+			const fullUrl = `${SPOTIFY_BASE_URL}/search?${queryString}`;
+			
+			const response = await axios.get(fullUrl, {
 				headers: {
 					Authorization: `Bearer ${token}`,
 				},
 				timeout: 10000,
 			});
+
 
 			const tracks = (response.data.tracks?.items || []).map((track) => ({
 				id: track.id,
@@ -454,7 +454,6 @@ router.get("/search", protect, async (req, res) => {
 				duration: track.duration_ms,
 			}));
 
-			console.log("[MEDIA] Search found", tracks.length, "tracks");
 			return res.status(200).json({
 				success: true,
 				tracks: tracks,
@@ -465,13 +464,7 @@ router.get("/search", protect, async (req, res) => {
 					$set: { "spotifyAuth.isConnected": false },
 				});
 			}
-			const errorDetails = {
-				status: spotifyError.response?.status,
-				data: spotifyError.response?.data,
-				message: spotifyError.message,
-				query: q,
-			};
-			console.error("[MEDIA] Spotify search error details:", JSON.stringify(errorDetails, null, 2));
+			// Search failed silently
 			return res.status(200).json({
 				success: true,
 				tracks: [],
@@ -504,18 +497,16 @@ router.post("/play", protect, async (req, res) => {
 
 		try {
 			const token = await getValidToken(req.user._id);
-
+			
 			let uris = [];
 			if (trackUri) {
 				uris = [trackUri];
 			} else if (query) {
 				// Search for track first
-				const searchResponse = await axios.get(`${SPOTIFY_BASE_URL}/search`, {
-					params: {
-						q: query,
-						type: "track",
-						limit: 1,
-					},
+				const encoded_q = encodeURIComponent(query);
+				const searchUrl = `${SPOTIFY_BASE_URL}/search?q=${encoded_q}&type=track&limit=1`;
+				
+				const searchResponse = await axios.get(searchUrl, {
 					headers: {
 						Authorization: `Bearer ${token}`,
 					},
