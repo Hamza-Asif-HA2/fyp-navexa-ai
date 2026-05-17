@@ -20,6 +20,7 @@
     "expo-av": "~16.0.8",
     "expo-constants": "~18.0.13",
     "expo-file-system": "~19.0.22",
+    "expo-keep-awake": "~14.0.1",
     "expo-location": "^55.1.10",
     "expo-router": "~6.0.23",
     "expo-secure-store": "~15.0.8",

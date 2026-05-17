@@ -11,7 +11,6 @@ import {
   Linking,
   Alert,
   Animated,
-  PanResponder,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -74,41 +73,27 @@ function ProgressBar({ position, duration }: { position: number; duration: numbe
 }
 
 function VolumeControl({ value, onChange }: { value: number; onChange: (level: number) => void }) {
-  const [trackWidth, setTrackWidth] = useState(1);
+  const handlePress = (event: any) => {
+    const x = event.nativeEvent.locationX;
+    const trackWidth = (event.currentTarget as any).offsetWidth || SCREEN_WIDTH - 80;
+    const nextVolume = Math.max(0, Math.min(100, Math.round((x / trackWidth) * 100)));
+    onChange(nextVolume);
+  };
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (evt) => {
-          const x = evt.nativeEvent.locationX;
-          const nextVolume = Math.round((x / trackWidth) * 100);
-          onChange(nextVolume);
-        },
-        onPanResponderMove: (evt) => {
-          const x = evt.nativeEvent.locationX;
-          const nextVolume = Math.round((x / trackWidth) * 100);
-          onChange(nextVolume);
-        },
-      }),
-    [onChange, trackWidth]
-  );
+  const safeValue = Math.max(0, Math.min(100, value));
 
   return (
     <View style={styles.volumeWrap}>
       <MaterialCommunityIcons name="volume-high" size={18} color={theme.colors.textMuted} />
-      <View
+      <TouchableOpacity 
         style={styles.volumeTrack}
-        {...panResponder.panHandlers}
-        onLayout={(event) => {
-          setTrackWidth(event.nativeEvent.layout.width || 1);
-        }}
+        activeOpacity={1}
+        onPress={handlePress}
       >
-        <View style={[styles.volumeFill, { width: `${Math.max(0, Math.min(100, value))}%` as any }]} />
-        <View style={[styles.volumeThumb, { left: `${Math.max(0, Math.min(100, value))}%` as any }]} />
-      </View>
-      <Text style={styles.volumeValue}>{Math.round(value)}</Text>
+        <View style={[styles.volumeFill, { width: `${safeValue}%` }]} />
+        <View style={[styles.volumeThumb, { left: `${safeValue}%`, marginLeft: -8 }]} />
+      </TouchableOpacity>
+      <Text style={styles.volumeValue}>{Math.round(safeValue)}%</Text>
     </View>
   );
 }
@@ -126,7 +111,7 @@ export default function EntertainmentScreen() {
   const [recentTracks, setRecentTracks] = useState<SpotifyTrack[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [searchResults, setSearchResults] = useState<SpotifyTrack[]>([]);
-  const [activeTab, setActiveTab] = useState<'recent' | 'playlists'>('recent');
+  const [activeTab, setActiveTab] = useState<'recent' | 'playlists' | 'search'>('recent');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -149,12 +134,14 @@ export default function EntertainmentScreen() {
   const loadCurrentTrack = useCallback(async () => {
     try {
       const response: any = await apiClient.media.loadCurrentTrack();
+      console.log('[ENTERTAINMENT] Current track response:', response);
       setIsConnected(Boolean(response?.isConnected));
-      if (response?.currentTrack) {
-        setCurrentTrack(response.currentTrack);
-        setIsPlaying(Boolean(response?.isPlaying));
-        setPosition(Number(response?.position ?? 0));
-        setDuration(Number(response?.duration ?? parseDuration(response?.currentTrack?.duration)));
+      if (response?.track) {
+        setCurrentTrack(response.track);
+        setIsPlaying(Boolean(response?.track?.isPlaying));
+        // Backend sends position and duration in milliseconds, convert to seconds
+        setPosition(Number(response?.track?.position ?? 0) / 1000);
+        setDuration(Number(response?.track?.duration ?? 0) / 1000);
       } else {
         setCurrentTrack(null);
       }
@@ -167,7 +154,15 @@ export default function EntertainmentScreen() {
   const loadPlaylists = useCallback(async () => {
     try {
       const response: any = await apiClient.media.loadPlaylists();
-      setPlaylists(Array.isArray(response?.playlists) ? response.playlists : []);
+      console.log('[ENTERTAINMENT] Playlists response:', response);
+      const playlists = Array.isArray(response?.playlists) 
+        ? response.playlists.map((p: any) => ({
+            ...p,
+            image: p.imageUrl || p.image, // Map backend imageUrl to image
+          }))
+        : [];
+      console.log('[ENTERTAINMENT] Mapped playlists:', playlists);
+      setPlaylists(playlists);
     } catch (error) {
       console.error('[ENTERTAINMENT] loadPlaylists failed:', error);
       setPlaylists([]);
@@ -176,8 +171,31 @@ export default function EntertainmentScreen() {
 
   const loadRecentTracks = useCallback(async () => {
     try {
-      const response: any = await apiClient.media.searchSpotify('drive');
-      setRecentTracks(Array.isArray(response?.tracks) ? response.tracks : []);
+      // Try searching for a generic popular query
+      const queries = ['popular', 'trending', 'top'];
+      for (const query of queries) {
+        try {
+          console.log('[ENTERTAINMENT] Loading recent tracks with query:', query);
+          const response: any = await apiClient.media.searchSpotify(query);
+          console.log('[ENTERTAINMENT] Recent tracks response:', response);
+          const tracks = Array.isArray(response?.tracks)
+            ? response.tracks.map((t: any) => ({
+                ...t,
+                albumArt: t.albumArt || t.image,
+                duration: t.duration || 0,
+              }))
+            : [];
+          if (tracks.length > 0) {
+            console.log('[ENTERTAINMENT] Loaded', tracks.length, 'tracks');
+            setRecentTracks(tracks);
+            return;
+          }
+        } catch (err) {
+          console.log('[ENTERTAINMENT] Query failed:', query, err);
+          continue;
+        }
+      }
+      setRecentTracks([]);
     } catch (error) {
       console.error('[ENTERTAINMENT] loadRecentTracks failed:', error);
       setRecentTracks([]);
@@ -206,7 +224,11 @@ export default function EntertainmentScreen() {
       setIsConnected(true);
       setIsPlaying(true);
       setPosition(0);
-      setDuration(parseDuration(track.duration));
+      // Duration from backend is in milliseconds, convert to seconds
+      const durationMs = Number(track.duration ?? 0);
+      const durationSeconds = durationMs > 100 ? durationMs / 1000 : durationMs; // If > 100, it's likely ms
+      console.log('[ENTERTAINMENT] Playing track with duration:', durationMs, 'ms =', durationSeconds, 's');
+      setDuration(durationSeconds);
     } catch (error) {
       console.error('[ENTERTAINMENT] playTrack failed:', error);
       Alert.alert('Playback failed', 'Could not start track');
@@ -216,16 +238,19 @@ export default function EntertainmentScreen() {
   const playPlaylist = useCallback(
     async (playlist: Playlist) => {
       try {
-        const response: any = await apiClient.media.searchSpotify(playlist.name);
-        const firstTrack = response?.tracks?.[0];
-        if (firstTrack) {
-          await playTrack(firstTrack);
-        }
+        console.log('[ENTERTAINMENT] Playlist clicked:', playlist.name);
+        Alert.alert(
+          'Open in Spotify',
+          `To play "${playlist.name}", please open Spotify app directly. This playlist contains ${playlist.trackCount} songs.`,
+          [
+            { text: 'OK', onPress: () => {} },
+          ]
+        );
       } catch (error) {
         console.error('[ENTERTAINMENT] playPlaylist failed:', error);
       }
     },
-    [playTrack]
+    []
   );
 
   const togglePlayPause = useCallback(async () => {
@@ -257,9 +282,11 @@ export default function EntertainmentScreen() {
 
   const setVolume = useCallback(async (level: number) => {
     const nextVolume = Math.max(0, Math.min(100, level));
+    console.log('[ENTERTAINMENT] Setting volume to:', nextVolume);
     setVolumeState(nextVolume);
     try {
       await apiClient.media.setVolume(nextVolume);
+      console.log('[ENTERTAINMENT] Volume set successfully');
     } catch (error) {
       console.error('[ENTERTAINMENT] setVolume failed:', error);
     }
@@ -267,23 +294,43 @@ export default function EntertainmentScreen() {
 
   const searchSpotify = useCallback(async (query: string) => {
     setSearchQuery(query);
+    setLoading(true);
 
     if (searchTimerRef.current) {
       clearTimeout(searchTimerRef.current);
     }
 
-    if (query.trim().length < 3) {
+    console.log('[ENTERTAINMENT] Search triggered with query:', query, 'length:', query.length);
+
+    if (query.trim().length < 2) {
+      console.log('[ENTERTAINMENT] Query too short, clearing results');
       setSearchResults([]);
+      setLoading(false);
       return;
     }
 
     searchTimerRef.current = setTimeout(async () => {
       try {
+        console.log('[ENTERTAINMENT] Executing search for:', query.trim());
         const response: any = await apiClient.media.searchSpotify(query.trim());
-        setSearchResults(Array.isArray(response?.tracks) ? response.tracks : []);
+        console.log('[ENTERTAINMENT] Search response received:', response);
+        const tracks = Array.isArray(response?.tracks)
+          ? response.tracks.map((t: any) => {
+              console.log('[ENTERTAINMENT] Mapping track:', t.name);
+              return {
+                ...t,
+                albumArt: t.albumArt || t.image,
+                duration: t.duration || 0,
+              };
+            })
+          : [];
+        console.log('[ENTERTAINMENT] Search results count:', tracks.length);
+        setSearchResults(tracks);
       } catch (error) {
-        console.error('[ENTERTAINMENT] searchSpotify failed:', error);
+        console.error('[ENTERTAINMENT] searchSpotify error:', error);
         setSearchResults([]);
+      } finally {
+        setLoading(false);
       }
     }, 300);
   }, []);
@@ -292,6 +339,17 @@ export default function EntertainmentScreen() {
     loadCurrentTrack();
     loadPlaylists();
     loadRecentTracks();
+
+    // Set up polling to refresh current track every 3 seconds
+    pollTimerRef.current = setInterval(() => {
+      loadCurrentTrack();
+    }, 3000);
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+      }
+    };
   }, [loadCurrentTrack, loadPlaylists, loadRecentTracks]);
 
   useEffect(() => {
@@ -361,144 +419,159 @@ export default function EntertainmentScreen() {
     <View style={styles.container}>
       <StatusBar style="light" />
 
+      {/* Background with blur */}
       {albumArt ? (
-        <Image source={{ uri: albumArt }} blurRadius={20} style={StyleSheet.absoluteFillObject} />
+        <Image source={{ uri: albumArt }} blurRadius={40} style={StyleSheet.absoluteFillObject} />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, styles.fallbackBg]} />
       )}
       <View style={styles.overlay} />
 
-      <View style={styles.layout}>
-        <View style={styles.leftPanel}>
-          <View style={styles.albumCard}>
-            {albumArt ? (
-              <Image source={{ uri: albumArt }} style={styles.albumArt} />
-            ) : (
-              <View style={styles.albumFallback}>
-                <MaterialCommunityIcons name="music-note" size={56} color={theme.colors.accentPurple} />
-              </View>
-            )}
-          </View>
-
-          <Text style={styles.trackTitle} numberOfLines={2}>
-            {displayTrack?.name || 'No track playing'}
-          </Text>
-          <Text style={styles.artistName} numberOfLines={1}>
-            {displayTrack?.artist || 'Open Spotify to start playback'}
-          </Text>
-
-          <ProgressBar position={position} duration={duration} />
-
-          <View style={styles.controlsRow}>
-            <TouchableOpacity onPress={skipPrev} style={styles.controlButton} activeOpacity={0.8}>
-              <MaterialCommunityIcons name="skip-previous" size={32} color={theme.colors.textPrimary} />
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={togglePlayPause} style={styles.playPauseButton} activeOpacity={0.8}>
-              <MaterialCommunityIcons name={isPlaying ? 'pause' : 'play'} size={28} color={theme.colors.textPrimary} />
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={skipNext} style={styles.controlButton} activeOpacity={0.8}>
-              <MaterialCommunityIcons name="skip-next" size={32} color={theme.colors.textPrimary} />
-            </TouchableOpacity>
-          </View>
-
-          <VolumeControl value={volume} onChange={setVolume} />
-        </View>
-
-        <View style={styles.rightPanel}>
-          <View style={styles.searchBar}>
-            <MaterialCommunityIcons name="magnify" size={20} color={theme.colors.accentPurple} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search Spotify"
-              placeholderTextColor={theme.colors.textMuted}
-              value={searchQuery}
-              onChangeText={searchSpotify}
-              onSubmitEditing={() => searchSpotify(searchQuery)}
-              returnKeyType="search"
-            />
-            {searchQuery.length > 0 ? (
-              <TouchableOpacity onPress={() => searchSpotify('')}>
-                <MaterialCommunityIcons name="close" size={20} color={theme.colors.accentPurple} />
-              </TouchableOpacity>
-            ) : null}
-          </View>
-
-          <View style={styles.tabsRow}>
-            <TouchableOpacity onPress={() => setActiveTab('recent')} style={styles.tabPill}>
-              <Text style={[styles.tabText, activeTab === 'recent' && styles.tabTextActive]}>Recent</Text>
-              {activeTab === 'recent' && <View style={styles.tabUnderline} />}
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setActiveTab('playlists')} style={styles.tabPill}>
-              <Text style={[styles.tabText, activeTab === 'playlists' && styles.tabTextActive]}>Playlists</Text>
-              {activeTab === 'playlists' && <View style={styles.tabUnderline} />}
-            </TouchableOpacity>
-          </View>
-
-          <FlatList
-            data={visibleItems}
-            keyExtractor={(item: any) => item.key}
-            contentContainerStyle={styles.listContent}
-            keyboardShouldPersistTaps="handled"
-            renderItem={({ item }: any) => {
-              if (item.type === 'playlist') {
-                return (
-                  <TouchableOpacity style={styles.listItem} onPress={() => playPlaylist(item)} activeOpacity={0.8}>
-                    {item.image ? (
-                      <Image source={{ uri: item.image }} style={styles.itemThumb} />
-                    ) : (
-                      <View style={styles.itemThumbFallback} />
-                    )}
-                    <View style={styles.itemTextWrap}>
-                      <Text style={styles.itemTitle} numberOfLines={1}>{item.name}</Text>
-                      <Text style={styles.itemSubtitle}>{item.trackCount} tracks</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              }
-
-              return (
-                <TouchableOpacity style={styles.listItem} onPress={() => playTrack(item)} activeOpacity={0.8}>
-                  {item.image ? (
-                    <Image source={{ uri: item.image }} style={styles.itemThumb} />
-                  ) : (
-                    <View style={styles.itemThumbFallback}>
-                      <MaterialCommunityIcons name="music-note" size={18} color={theme.colors.accentPurple} />
-                    </View>
-                  )}
-                  <View style={styles.itemTextWrap}>
-                    <Text style={styles.itemTitle} numberOfLines={1}>{item.name}</Text>
-                    <Text style={styles.itemSubtitle} numberOfLines={1}>{item.artist}</Text>
+      {/* Scrollable Content */}
+      <FlatList
+        data={visibleItems}
+        keyExtractor={(item: any) => item.key}
+        contentContainerStyle={styles.flatListContent}
+        keyboardShouldPersistTaps="handled"
+        scrollEventThrottle={16}
+        nestedScrollEnabled={true}
+        ListHeaderComponent={
+          <View style={styles.playerSection}>
+            {/* Now Playing Card */}
+            <View style={styles.nowPlayingCard}>
+              <View style={styles.albumArtContainer}>
+                {albumArt ? (
+                  <Image source={{ uri: albumArt }} style={styles.largeAlbumArt} />
+                ) : (
+                  <View style={styles.albumArtPlaceholder}>
+                    <MaterialCommunityIcons name="music-note-multiple" size={64} color={theme.colors.accentPurple} />
                   </View>
-                  <Text style={styles.itemDuration}>{item.duration}</Text>
-                </TouchableOpacity>
-              );
-            }}
-            ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyText}>No results found</Text>
+                )}
               </View>
-            }
-          />
-        </View>
-      </View>
 
-      <View style={styles.voiceDotWrap} pointerEvents="none">
-        <Animated.View
-          style={[
-            styles.voiceDot,
-            {
-              transform: [
-                {
-                  scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.35] }),
-                },
-              ],
-              opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.65, 1] }),
-            },
-          ]}
-        />
-      </View>
+              {/* Track Info */}
+              <View style={styles.trackInfoSection}>
+                <Text style={styles.trackTitleLarge} numberOfLines={3}>
+                  {currentTrack?.name || 'No track playing'}
+                </Text>
+                <Text style={styles.artistNameLarge} numberOfLines={2}>
+                  {currentTrack?.artist || 'Not connected'}
+                </Text>
+              </View>
+
+              {/* Progress Bar */}
+              <ProgressBar position={position} duration={duration} />
+
+              {/* Player Controls */}
+              <View style={styles.playerControls}>
+                <TouchableOpacity onPress={skipPrev} style={styles.controlBtn} activeOpacity={0.7}>
+                  <MaterialCommunityIcons name="skip-previous" size={28} color={theme.colors.textPrimary} />
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={togglePlayPause} style={styles.playPauseBtnLarge} activeOpacity={0.7}>
+                  <MaterialCommunityIcons 
+                    name={isPlaying ? 'pause-circle' : 'play-circle'} 
+                    size={60} 
+                    color={theme.colors.accentPurple} 
+                  />
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={skipNext} style={styles.controlBtn} activeOpacity={0.7}>
+                  <MaterialCommunityIcons name="skip-next" size={28} color={theme.colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Volume Control */}
+              <View style={styles.volumeSection}>
+                <VolumeControl value={volume} onChange={setVolume} />
+              </View>
+            </View>
+
+            {/* Search Bar */}
+            <View style={styles.searchBarContainer}>
+              <View style={styles.searchBarInner}>
+                <MaterialCommunityIcons name="magnify" size={20} color={theme.colors.textMuted} />
+                <TextInput
+                  style={styles.searchInputField}
+                  placeholder="Search tracks..."
+                  placeholderTextColor={theme.colors.textMuted}
+                  value={searchQuery}
+                  onChangeText={searchSpotify}
+                  returnKeyType="search"
+                />
+                {searchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => searchSpotify('')}>
+                    <MaterialCommunityIcons name="close-circle" size={20} color={theme.colors.textMuted} />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {/* Tabs */}
+            <View style={styles.tabsContainer}>
+              <TouchableOpacity 
+                onPress={() => setActiveTab('recent')} 
+                style={[styles.tab, activeTab === 'recent' && styles.tabActive]}
+              >
+                <Text style={[styles.tabLabel, activeTab === 'recent' && styles.tabLabelActive]}>
+                  Recent
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={() => setActiveTab('playlists')} 
+                style={[styles.tab, activeTab === 'playlists' && styles.tabActive]}
+              >
+                <Text style={[styles.tabLabel, activeTab === 'playlists' && styles.tabLabelActive]}>
+                  Playlists
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        }
+        renderItem={({ item }: any) => {
+          if (item.type === 'playlist') {
+            return (
+              <TouchableOpacity style={styles.trackListItem} onPress={() => playPlaylist(item)} activeOpacity={0.6}>
+                <View style={styles.trackItemThumb}>
+                  {item.image ? (
+                    <Image source={{ uri: item.image }} style={styles.trackThumbImage} />
+                  ) : (
+                    <MaterialCommunityIcons name="playlist-music" size={24} color={theme.colors.accentPurple} />
+                  )}
+                </View>
+                <View style={styles.trackItemInfo}>
+                  <Text style={styles.trackItemTitle} numberOfLines={1}>{item.name}</Text>
+                  <Text style={styles.trackItemSubtitle}>{item.trackCount ?? 0} songs</Text>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={20} color={theme.colors.textMuted} />
+              </TouchableOpacity>
+            );
+          }
+
+          return (
+            <TouchableOpacity style={styles.trackListItem} onPress={() => playTrack(item)} activeOpacity={0.6}>
+              <View style={styles.trackItemThumb}>
+                {item.albumArt ? (
+                  <Image source={{ uri: item.albumArt }} style={styles.trackThumbImage} />
+                ) : (
+                  <MaterialCommunityIcons name="music-note" size={24} color={theme.colors.accentPurple} />
+                )}
+              </View>
+              <View style={styles.trackItemInfo}>
+                <Text style={styles.trackItemTitle} numberOfLines={1}>{item.name}</Text>
+                <Text style={styles.trackItemSubtitle} numberOfLines={1}>{item.artist}</Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={20} color={theme.colors.textMuted} />
+            </TouchableOpacity>
+          );
+        }}
+        ListEmptyComponent={
+          <View style={styles.emptyStateContainer}>
+            <MaterialCommunityIcons name="music-note-off" size={48} color={theme.colors.textMuted} />
+            <Text style={styles.emptyStateText}>No tracks found</Text>
+          </View>
+        }
+      />
     </View>
   );
 }
@@ -509,236 +582,263 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.bgPrimary,
   },
   fallbackBg: {
-    backgroundColor: theme.colors.bgPrimary,
+    backgroundColor: '#0A0A0F',
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(10,10,15,0.85)',
+    backgroundColor: 'rgba(5,5,10,0.88)',
   },
-  layout: {
+  mainContent: {
     flex: 1,
-    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 24,
   },
-  leftPanel: {
-    width: LEFT_PANEL_WIDTH,
-    padding: 16,
-    justifyContent: 'center',
-  },
-  rightPanel: {
-    flex: 1,
-    paddingTop: 16,
-    paddingRight: 16,
+  playerSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
     paddingBottom: 16,
   },
-  albumCard: {
+  flatListContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 24,
+  },
+  nowPlayingCard: {
+    backgroundColor: 'rgba(20,20,28,0.7)',
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(108,99,255,0.15)',
+  },
+  albumArtContainer: {
     width: '100%',
     aspectRatio: 1,
     borderRadius: 16,
     overflow: 'hidden',
+    marginBottom: 20,
+    backgroundColor: '#12121A',
     shadowColor: theme.colors.accentPurple,
-    shadowOpacity: 0.4,
-    shadowRadius: 14,
-    elevation: 10,
-    backgroundColor: '#11111A',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 12,
   },
-  albumArt: {
+  largeAlbumArt: {
     width: '100%',
     height: '100%',
   },
-  albumFallback: {
+  albumArtPlaceholder: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#12121A',
   },
-  trackTitle: {
-    marginTop: 12,
-    color: theme.colors.textPrimary,
-    fontSize: 18,
-    fontWeight: '700',
+  trackInfoSection: {
+    marginBottom: 16,
   },
-  artistName: {
-    marginTop: 4,
+  trackTitleLarge: {
+    color: theme.colors.textPrimary,
+    fontSize: 22,
+    fontWeight: '800',
+    marginBottom: 6,
+    lineHeight: 28,
+  },
+  artistNameLarge: {
     color: theme.colors.textMuted,
-    fontSize: 14,
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 21,
   },
   progressWrap: {
-    marginTop: 12,
+    marginBottom: 18,
   },
   progressTrack: {
-    height: 3,
+    height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     overflow: 'hidden',
+    marginBottom: 10,
   },
   progressFill: {
     height: '100%',
     backgroundColor: theme.colors.accentPurple,
+    borderRadius: 2,
   },
   progressLabels: {
-    marginTop: 6,
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
   progressText: {
     color: theme.colors.textMuted,
-    fontSize: 11,
+    fontSize: 12,
+    fontWeight: '500',
   },
-  controlsRow: {
-    marginTop: 16,
+  playerControls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 24,
+    gap: 32,
+    marginBottom: 16,
   },
-  controlButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playPauseButton: {
+  controlBtn: {
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: theme.colors.accentPurple,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(108,99,255,0.1)',
+  },
+  playPauseBtnLarge: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.accentPurple,
     shadowColor: theme.colors.accentPurple,
-    shadowOpacity: 0.45,
-    shadowRadius: 10,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  volumeSection: {
+    paddingVertical: 12,
   },
   volumeWrap: {
-    marginTop: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
   },
   volumeTrack: {
     flex: 1,
-    height: 20,
+    height: 24,
     justifyContent: 'center',
   },
   volumeFill: {
-    height: 4,
-    borderRadius: 2,
+    height: 5,
+    borderRadius: 2.5,
     backgroundColor: theme.colors.accentPurple,
   },
   volumeThumb: {
     position: 'absolute',
     top: 5,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     backgroundColor: theme.colors.accentPurple,
     shadowColor: theme.colors.accentPurple,
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.5,
-    shadowRadius: 6,
+    shadowRadius: 8,
     elevation: 4,
   },
   volumeValue: {
     color: theme.colors.textMuted,
-    fontSize: 12,
-    width: 28,
+    fontSize: 13,
+    fontWeight: '600',
+    width: 32,
     textAlign: 'right',
   },
-  searchBar: {
+  searchBarContainer: {
+    marginBottom: 16,
+  },
+  searchBarInner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    backgroundColor: '#12121A',
-    borderRadius: 12,
+    backgroundColor: 'rgba(20,20,28,0.8)',
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(108,99,255,0.3)',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 12,
+    borderColor: 'rgba(108,99,255,0.25)',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
-  searchInput: {
+  searchInputField: {
     flex: 1,
     color: theme.colors.textPrimary,
-    fontSize: 14,
+    fontSize: 15,
+    fontWeight: '500',
   },
-  tabsRow: {
+  tabsContainer: {
     flexDirection: 'row',
-    gap: 24,
-    marginBottom: 10,
-    paddingLeft: 4,
+    gap: 12,
+    marginBottom: 12,
   },
-  tabPill: {
-    paddingBottom: 8,
+  tab: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: 'rgba(20,20,28,0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(108,99,255,0.1)',
+    alignItems: 'center',
   },
-  tabText: {
+  tabActive: {
+    backgroundColor: theme.colors.accentPurple,
+    borderColor: theme.colors.accentPurple,
+  },
+  tabLabel: {
     color: theme.colors.textMuted,
     fontSize: 14,
     fontWeight: '600',
   },
-  tabTextActive: {
-    color: theme.colors.accentPurple,
+  tabLabelActive: {
+    color: theme.colors.textPrimary,
   },
-  tabUnderline: {
-    marginTop: 6,
-    height: 2,
-    width: 28,
-    borderRadius: 1,
-    backgroundColor: theme.colors.accentPurple,
+  listContentContainer: {
+    paddingBottom: 16,
   },
-  listContent: {
-    paddingBottom: 24,
-  },
-  listItem: {
-    height: 60,
+  trackListItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 12,
-    marginBottom: 8,
-    backgroundColor: 'rgba(15,15,19,0.65)',
+    marginBottom: 10,
+    backgroundColor: 'rgba(20,20,28,0.6)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(108,99,255,0.1)',
   },
-  itemThumb: {
-    width: 40,
-    height: 40,
-    borderRadius: 4,
-    marginRight: 10,
-    backgroundColor: '#11111A',
+  trackItemThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    marginRight: 12,
+    backgroundColor: '#12121A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
-  itemThumbFallback: {
-    width: 40,
-    height: 40,
-    borderRadius: 4,
-    marginRight: 10,
-    backgroundColor: '#11111A',
+  trackThumbImage: {
+    width: '100%',
+    height: '100%',
+  },
+  trackItemInfo: {
+    flex: 1,
+  },
+  trackItemTitle: {
+    color: theme.colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  trackItemSubtitle: {
+    color: theme.colors.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  emptyStateContainer: {
+    paddingVertical: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  itemTextWrap: {
-    flex: 1,
-    marginRight: 10,
-  },
-  itemTitle: {
-    color: theme.colors.textPrimary,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  itemSubtitle: {
+  emptyStateText: {
     color: theme.colors.textMuted,
-    fontSize: 12,
-    marginTop: 2,
-  },
-  itemDuration: {
-    color: theme.colors.textMuted,
-    fontSize: 12,
-  },
-  emptyState: {
-    paddingVertical: 36,
-    alignItems: 'center',
-  },
-  emptyText: {
-    color: theme.colors.textMuted,
-    fontSize: 13,
+    fontSize: 15,
+    fontWeight: '500',
+    marginTop: 12,
   },
   connectionScreen: {
     flex: 1,
@@ -789,16 +889,5 @@ const styles = StyleSheet.create({
     color: theme.colors.textPrimary,
     fontSize: 15,
     fontWeight: '700',
-  },
-  voiceDotWrap: {
-    position: 'absolute',
-    right: 16,
-    bottom: 16,
-  },
-  voiceDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: theme.colors.accentPurple,
   },
 });

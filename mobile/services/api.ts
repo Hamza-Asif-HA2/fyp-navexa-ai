@@ -3,7 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const TOKEN_KEY = 'navexa_token';
 
-const baseURL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:5000';
+const baseURL = process.env.EXPO_PUBLIC_API_URL ?? 'https://dreamlessly-unbrined-elin.ngrok-free.dev';
 
 export const api = axios.create({
   baseURL,

@@ -11,7 +11,7 @@ const SPOTIFY_BASE_URL = "https://api.spotify.com/v1";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize";
 const DEFAULT_SPOTIFY_APP_REDIRECT_URI = "navexa://spotify/callback";
-const DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI = "http://192.168.100.116:5000/api/media/spotify/callback";
+const DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI = "http://localhost:5000/api/media/spotify/callback";
 
 /**
  * Helper: Get valid Spotify access token, refresh if needed
@@ -94,7 +94,7 @@ const buildAppRedirect = (targetUri, query = {}) => {
 
 const resolveSpotifyRedirectUri = (requestedRedirectUri) => {
 	const configuredRedirectUri = process.env.SPOTIFY_REDIRECT_URI;
-	const redirectUri = String(requestedRedirectUri || configuredRedirectUri || DEFAULT_SPOTIFY_APP_REDIRECT_URI).trim();
+	const redirectUri = String(requestedRedirectUri || configuredRedirectUri || DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI).trim();
 
 	if (
 		!redirectUri ||
@@ -105,7 +105,7 @@ const resolveSpotifyRedirectUri = (requestedRedirectUri) => {
 	) {
 		return configuredRedirectUri && !configuredRedirectUri.includes("localhost")
 			? configuredRedirectUri
-			: DEFAULT_SPOTIFY_APP_REDIRECT_URI;
+			: DEFAULT_SPOTIFY_CALLBACK_REDIRECT_URI;
 	}
 
 	return redirectUri;
@@ -343,6 +343,7 @@ router.get("/now-playing", protect, async (req, res) => {
 		if (!user?.spotifyAuth?.isConnected) {
 			return res.status(200).json({
 				success: true,
+				isConnected: false,
 				track: null,
 			});
 		}
@@ -359,6 +360,7 @@ router.get("/now-playing", protect, async (req, res) => {
 			if (response.status === 204 || !response.data?.item) {
 				return res.status(200).json({
 					success: true,
+					isConnected: true,
 					track: null,
 				});
 			}
@@ -369,6 +371,7 @@ router.get("/now-playing", protect, async (req, res) => {
 
 			return res.status(200).json({
 				success: true,
+				isConnected: true,
 				track: {
 					name: item.name,
 					artist: artists,
@@ -389,6 +392,7 @@ router.get("/now-playing", protect, async (req, res) => {
 			console.error("[MEDIA] Spotify now-playing error:", spotifyError.message);
 			return res.status(200).json({
 				success: true,
+				isConnected: false,
 				track: null,
 			});
 		}
@@ -426,10 +430,13 @@ router.get("/search", protect, async (req, res) => {
 
 		try {
 			const token = await getValidToken(req.user._id);
+			const searchQuery = String(q).trim();
+			console.log("[MEDIA] Searching Spotify for:", searchQuery);
+			
 			const response = await axios.get(`${SPOTIFY_BASE_URL}/search`, {
 				params: {
-					q: q,
-					type: "track",
+					q: searchQuery,
+					type: 'track',
 					limit: 20,
 				},
 				headers: {
@@ -447,6 +454,7 @@ router.get("/search", protect, async (req, res) => {
 				duration: track.duration_ms,
 			}));
 
+			console.log("[MEDIA] Search found", tracks.length, "tracks");
 			return res.status(200).json({
 				success: true,
 				tracks: tracks,
@@ -457,7 +465,13 @@ router.get("/search", protect, async (req, res) => {
 					$set: { "spotifyAuth.isConnected": false },
 				});
 			}
-			console.error("[MEDIA] Spotify search error:", spotifyError.message);
+			const errorDetails = {
+				status: spotifyError.response?.status,
+				data: spotifyError.response?.data,
+				message: spotifyError.message,
+				query: q,
+			};
+			console.error("[MEDIA] Spotify search error details:", JSON.stringify(errorDetails, null, 2));
 			return res.status(200).json({
 				success: true,
 				tracks: [],
@@ -842,13 +856,18 @@ router.get("/playlists", protect, async (req, res) => {
 				timeout: 10000,
 			});
 
-			const playlists = (response.data.items || []).map((playlist) => ({
-				id: playlist.id,
-				name: playlist.name,
-				trackCount: playlist.tracks?.total || 0,
-				imageUrl: playlist.images?.[0]?.url || "",
-			}));
+			const playlists = (response.data.items || []).map((playlist) => {
+				const trackCount = playlist.tracks?.total || 0;
+				console.log("[MEDIA] Playlist:", playlist.name, "tracks:", trackCount);
+				return {
+					id: playlist.id,
+					name: playlist.name,
+					trackCount: trackCount,
+					imageUrl: playlist.images?.[0]?.url || "",
+				};
+			});
 
+			console.log("[MEDIA] Returning playlists:", playlists);
 			return res.status(200).json({
 				success: true,
 				playlists: playlists,
