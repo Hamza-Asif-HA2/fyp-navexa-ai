@@ -4,6 +4,7 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { Provider, useDispatch } from 'react-redux';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { theme } from '../constants/theme';
 import { setAuth } from '../store/authSlice';
 import { store, useAppSelector } from '../store';
@@ -89,9 +90,13 @@ export default function RootLayout() {
 
   return (
     <Provider store={store}>
-      <ThemeProvider value={navTheme}>
-        <AppBootstrap />
-      </ThemeProvider>
+      <SafeAreaProvider>
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.bgPrimary }} edges={['top', 'left', 'right']}>
+          <ThemeProvider value={navTheme}>
+            <AppBootstrap />
+          </ThemeProvider>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Provider>
   );
 }
