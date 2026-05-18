@@ -18,24 +18,76 @@ function mapPipelineToRobot(state: PipelineState): 'idle' | 'listening' | 'think
 }
 
 function extractResponseText(response: unknown): string {
-  if (!response) return '';
-  if (typeof response === 'string') {
-    // Try to parse if it's a JSON string
-    if (response.startsWith('{') && response.endsWith('}')) {
-      try {
-        const parsed = JSON.parse(response);
-        return parsed?.text || parsed?.response || parsed?.message || response;
-      } catch {
-        return response;
-      }
+  const cleanText = (value: string): string => {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+
+    // Hide transport markers like "tts:" from user-facing bubble copy.
+    return trimmed.replace(/^\(?tts\)?\s*[:\-]?\s*/i, '');
+  };
+
+  const extractJsonPayload = (value: string): string => {
+    const cleaned = value
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      return cleaned.slice(firstBrace, lastBrace + 1);
     }
-    return response;
-  }
-  // If it's an object
-  if (typeof response === 'object') {
-    return (response as any)?.text || (response as any)?.response || (response as any)?.message || JSON.stringify(response);
-  }
-  return String(response);
+
+    return cleaned;
+  };
+
+  const pick = (value: unknown): string => {
+    if (value == null) return '';
+
+    if (typeof value === 'string') {
+      const raw = cleanText(value);
+      if (!raw) return '';
+
+      const looksLikeJson = raw.includes('{') && raw.includes('}');
+      if (looksLikeJson) {
+        try {
+          const parsed = JSON.parse(extractJsonPayload(raw));
+          const fromParsed = pick(parsed);
+          if (fromParsed) return fromParsed;
+        } catch {
+          // Keep raw text fallback.
+        }
+      }
+
+      return raw;
+    }
+
+    if (typeof value === 'object') {
+      const obj = value as any;
+
+      const candidates: unknown[] = [
+        obj?.text,
+        obj?.response,
+        obj?.message,
+        obj?.tts,
+        obj?.data?.text,
+        obj?.data?.response,
+        obj?.data?.message,
+      ];
+
+      for (const candidate of candidates) {
+        const result = pick(candidate);
+        if (result) return result;
+      }
+
+      return '';
+    }
+
+    return cleanText(String(value));
+  };
+
+  return pick(response);
 }
 
 export default function HomeScreen() {
@@ -56,7 +108,14 @@ export default function HomeScreen() {
       console.log('[PIPELINE] Home onAction:', { intent, action });
       switch (intent) {
         case 'NAVIGATE_TO':
-          router.push({ pathname: '/(main)/navigation', params: { destination: (action as any)?.destination } } as never);
+          try {
+            const dest = (action as any)?.destination;
+            const destParam = typeof dest === 'string' ? dest : dest ? JSON.stringify(dest) : '';
+            router.push({ pathname: '/(main)/navigation', params: { destination: destParam } } as never);
+          } catch (e) {
+            console.error('[PIPELINE] NAVIGATE_TO push failed:', e);
+            router.push({ pathname: '/(main)/navigation' } as never);
+          }
           break;
         case 'PLAY_MUSIC':
           router.push({ pathname: '/(main)/entertainment', params: { q: (action as any)?.query ?? (action as any)?.track } } as never);
@@ -115,6 +174,7 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!lastResponse) return;
     console.log('[HOME] Showing conversation bubble with text:', lastResponse);
+
     console.log('[HOME] Bubble text type:', typeof lastResponse, 'length:', lastResponse.length);
     setShowBubble(true);
     const timer = setTimeout(() => {

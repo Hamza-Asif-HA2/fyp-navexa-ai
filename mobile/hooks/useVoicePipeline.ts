@@ -103,6 +103,18 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
   const normalizeModelText = useCallback((value: unknown): string => {
     if (value == null) return '';
+
+    if (typeof value === 'object') {
+      const obj = value as any;
+      return (
+        normalizeModelText(obj?.text) ||
+        normalizeModelText(obj?.response) ||
+        normalizeModelText(obj?.message) ||
+        normalizeModelText(obj?.tts) ||
+        ''
+      );
+    }
+
     if (typeof value !== 'string') return String(value);
 
     const raw = value.trim();
@@ -111,16 +123,14 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
     if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
       try {
         const parsed = JSON.parse(raw);
-        if (typeof parsed === 'string') return parsed;
-        if (typeof parsed?.response === 'string') return parsed.response;
-        if (typeof parsed?.text === 'string') return parsed.text;
-        if (typeof parsed?.message === 'string') return parsed.message;
+        const parsedText = normalizeModelText(parsed);
+        if (parsedText) return parsedText;
       } catch {
         // keep raw if not valid JSON
       }
     }
 
-    return raw;
+    return raw.replace(/^\(?tts\)?\s*[:\-]?\s*/i, '');
   }, []);
 
   const requestMicPermission = useCallback(async (): Promise<boolean> => {
@@ -189,6 +199,41 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
         } catch (e) {
           console.log('[PIPELINE] Failed to parse stringified response');
         }
+      }
+
+      // If the provider returned an object with a string `response` that itself contains
+      // a JSON-like payload (common when providers return a wrapped string), try to
+      // extract and parse the inner JSON and merge it into the result so `intent`/`action`
+      // are available to the client.
+      try {
+        const respStr = result?.response;
+        if (typeof respStr === 'string' && respStr.includes('{') && respStr.includes('}')) {
+          const start = respStr.indexOf('{');
+          const end = respStr.lastIndexOf('}');
+          const jsonCandidate = respStr.slice(start, end + 1);
+          let parsedInner = null;
+          try {
+            parsedInner = JSON.parse(jsonCandidate);
+            console.log('[PIPELINE] Parsed inner JSON from response');
+          } catch (e) {
+            try {
+              // Try a permissive fallback: convert single quotes to double quotes
+              const fixed = jsonCandidate.replace(/'/g, '"');
+              parsedInner = JSON.parse(fixed);
+              console.log('[PIPELINE] Parsed inner JSON after single-quote fix');
+            } catch (e2) {
+              // give up silently; inner parsing failed
+            }
+          }
+
+          if (parsedInner && typeof parsedInner === 'object') {
+            // Merge parsed inner object into top-level result when helpful
+            result = { ...result, ...parsedInner };
+            console.log('[PIPELINE] Merged inner payload into result:', JSON.stringify(parsedInner));
+          }
+        }
+      } catch (e) {
+        console.warn('[PIPELINE] Inner JSON extraction failed:', e);
       }
 
       const rawText = result?.text ?? result?.response ?? result?.message ?? '';
@@ -340,7 +385,33 @@ export function useVoicePipeline({ onAction, getContext }: UseVoicePipelineArgs 
 
         setPipelineState('idle');
         console.log('[PIPELINE] Executing action after speaking:', { intent, action });
-        onActionRef.current?.(intent, action);
+
+        // Heuristic fallback: if model returned GENERAL_CHAT or null but user asked to play music,
+        // treat it as a PLAY_MUSIC intent so UI can navigate/play.
+        let finalIntent = intent as string | null;
+        let finalAction = action as any;
+
+        const transcriptLower = String(nextTranscript || '').toLowerCase();
+        const playKeywords = /\b(play|spotify|song|music|anything)\b/i;
+
+        if ((finalIntent === null || finalIntent === 'GENERAL_CHAT') && playKeywords.test(transcriptLower)) {
+          console.log('[PIPELINE] Applying play-music heuristic for ambiguous AI response');
+          finalIntent = 'PLAY_MUSIC';
+          // If action already has a query/useful payload, keep it; otherwise use a safe default.
+          finalAction = finalAction || { query: transcriptLower.includes('anything') ? 'popular' : transcriptLower };
+        }
+
+        console.log('[PIPELINE] Final intent/action prepared for onAction:', {
+          finalIntent,
+          finalAction,
+          hasOnActionHandler: !!onActionRef.current,
+        });
+
+        try {
+          onActionRef.current?.(finalIntent, finalAction);
+        } catch (e) {
+          console.error('[PIPELINE] onAction handler threw error:', e);
+        }
       } catch (error) {
         console.error('[PIPELINE] Error:', error);
         await speak('Sorry, something went wrong. Try again.');

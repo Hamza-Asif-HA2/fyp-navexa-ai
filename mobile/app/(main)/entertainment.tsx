@@ -77,6 +77,8 @@ export default function EntertainmentScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
 
+  const lastAutoPlayRef = useRef<{ key: string; ts: number }>({ key: '', ts: 0 });
+
   const [isConnected, setIsConnected] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<SpotifyTrack | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -318,8 +320,67 @@ export default function EntertainmentScreen() {
 
   useEffect(() => {
     const uri = String((params as any)?.trackUri ?? (params as any)?.uri ?? '');
+    const q = String((params as any)?.q ?? '').trim();
+
+    // Avoid auto-playing repeatedly: skip if same key was auto-played within 5s
+    const key = uri || q;
+    if (!key) return;
+
+    const recent = Date.now() - lastAutoPlayRef.current.ts < 5000 && lastAutoPlayRef.current.key === key;
+    if (recent) {
+      console.log('[ENTERTAINMENT] Skipping repeated auto-play for key:', key);
+      return;
+    }
+
+    lastAutoPlayRef.current = { key, ts: Date.now() };
+
     if (uri) {
-      apiClient.media.playTrack(uri).catch((error) => console.error('[ENTERTAINMENT] param play failed:', error));
+      (async () => {
+        try {
+          // Only trigger play if not already playing the same URI
+          if (!currentTrack || currentTrack?.uri !== uri) {
+            await apiClient.media.playTrack(uri);
+            setCurrentTrack({ id: '', uri } as any);
+            setIsPlaying(true);
+          }
+        } catch (error) {
+          console.error('[ENTERTAINMENT] param play failed:', error);
+        } finally {
+          // Clear route params so effect doesn't re-trigger
+          try {
+            router.replace({ pathname: '/(main)/entertainment' } as never);
+          } catch {}
+        }
+      })();
+      return;
+    }
+
+    if (q) {
+      (async () => {
+        try {
+          const response: any = await apiClient.media.searchSpotify(q);
+          const tracks = Array.isArray(response?.tracks) ? response.tracks : [];
+          if (tracks.length > 0) {
+            const first = tracks[0];
+            if (!currentTrack || currentTrack?.uri !== first.uri) {
+              await apiClient.media.playTrack(first.uri);
+              setCurrentTrack(first as any);
+              setIsPlaying(true);
+            }
+            setActiveTab('search');
+            setSearchQuery(q);
+            setSearchResults(tracks.map((t: any) => ({ ...t, albumArt: t.albumArt || t.image, duration: t.duration || 0 })));
+          } else {
+            console.log('[ENTERTAINMENT] No search results for query:', q);
+          }
+        } catch (error) {
+          console.error('[ENTERTAINMENT] auto-search-play failed:', error);
+        } finally {
+          try {
+            router.replace({ pathname: '/(main)/entertainment' } as never);
+          } catch {}
+        }
+      })();
     }
   }, [params]);
 

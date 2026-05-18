@@ -591,9 +591,23 @@ export default function NavigationScreen() {
 
   // Handle destination parameter from home screen
   useEffect(() => {
-    if (destParam && typeof destParam === 'string' && !isNavigating) {
+    if (destParam && !isNavigating) {
       console.log('[NAVIGATION] Destination param received:', destParam);
-      handleStartNavigation(destParam);
+      // If destParam looks like a JSON object (stringified), parse it back to an object
+      let parsed: string | Destination = String(destParam);
+      try {
+        const maybeObj = JSON.parse(String(destParam));
+        if (maybeObj && (maybeObj.latitude || maybeObj.lat || maybeObj.longitude || maybeObj.lng)) {
+          // Normalize common lat/lng keys
+          const lat = maybeObj.latitude ?? maybeObj.lat;
+          const lng = maybeObj.longitude ?? maybeObj.lng;
+          parsed = { latitude: Number(lat), longitude: Number(lng), address: maybeObj.address || '' } as Destination;
+        }
+      } catch {
+        // not JSON, keep as string address
+      }
+
+      handleStartNavigation(parsed);
     }
   }, [destParam, handleStartNavigation, isNavigating]);
 
