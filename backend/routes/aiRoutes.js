@@ -229,9 +229,13 @@ router.post("/speak", protect, async (req, res) => {
 		return res.status(200).send(audioBuffer);
 	} catch (error) {
 		console.error("[AI] Speak error:", error.message);
-		return res.status(503).json({
+		const status = error.response?.status;
+		const isAuthError = status === 401 || status === 403;
+
+		return res.status(isAuthError ? status : 503).json({
 			success: false,
-			message: "TTS unavailable, use device TTS",
+			code: isAuthError ? "TTS_AUTH_FAILED" : "TTS_UNAVAILABLE",
+			message: isAuthError ? "TTS auth failed, use device TTS" : "TTS unavailable, use device TTS",
 		});
 	}
 });

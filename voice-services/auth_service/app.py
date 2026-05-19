@@ -78,6 +78,11 @@ EMBEDDINGS_DIR.mkdir(exist_ok=True)
 encoder = VoiceEncoder()
 print("Resemblyzer VoiceEncoder loaded successfully")
 
+# Voice-quality parameters
+VOICED_TOP_DB = int(os.getenv("VOICED_TOP_DB", "30"))
+MIN_VOICED_RMS = float(os.getenv("MIN_VOICED_RMS", "0.01"))
+MIN_SNR_RATIO = float(os.getenv("MIN_SNR_RATIO", "1.2"))
+
 
 def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
@@ -175,13 +180,6 @@ def process_audio(audio_bytes: bytes, filename: str | None = None) -> np.ndarray
         duration_sec = len(wav) / float(sr)
         print(f"[AUDIO] Decoded waveform duration={duration_sec:.2f}s sr={sr}")
 
-        # Check minimum length
-        if duration_sec < MIN_AUDIO_SECONDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Audio too short ({duration_sec:.2f}s). Minimum is {MIN_AUDIO_SECONDS:.2f}s",
-            )
-
         # Keep compatibility with newer librosa: avoid resemblyzer.preprocess_wav,
         # which uses a deprecated positional resample call.
         wav = wav.astype(np.float32)
@@ -189,8 +187,47 @@ def process_audio(audio_bytes: bytes, filename: str | None = None) -> np.ndarray
         if max_abs > 0:
             wav = wav / max_abs
 
-        # Generate embedding
-        embedding = encoder.embed_utterance(wav)
+        # Use simple energy-based VAD to extract voiced segments and drop background
+        try:
+            intervals = librosa.effects.split(wav, top_db=VOICED_TOP_DB)
+        except Exception:
+            intervals = []
+
+        if len(intervals) == 0:
+            raise HTTPException(status_code=400, detail="No voiced segments detected (too quiet or noisy)")
+
+        # Concatenate voiced segments and compute voiced duration
+        voiced = np.concatenate([wav[s:e] for s, e in intervals]) if len(intervals) > 0 else np.array([], dtype=np.float32)
+        voiced_duration = len(voiced) / float(sr) if voiced.size > 0 else 0.0
+
+        if voiced_duration < MIN_AUDIO_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Speech too short after trimming ({voiced_duration:.2f}s). "
+                    f"Minimum is {MIN_AUDIO_SECONDS:.2f}s"
+                ),
+            )
+
+        # Basic SNR-style check: voiced RMS vs overall RMS
+        rms_total = float(np.sqrt(np.mean(wav ** 2))) if wav.size > 0 else 0.0
+        rms_voiced = float(np.sqrt(np.mean(voiced ** 2))) if voiced.size > 0 else 0.0
+        snr_ratio = (rms_voiced / (rms_total + 1e-12)) if rms_total > 0 else float('inf')
+
+        if rms_voiced < MIN_VOICED_RMS or snr_ratio < MIN_SNR_RATIO:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Recording appears noisy or too low energy (voiced_rms={rms_voiced:.5f}, "
+                    f"total_rms={rms_total:.5f}, snr_ratio={snr_ratio:.2f}). Try recording in a quieter environment."
+                ),
+            )
+
+        # Final audio to embed: use voiced segments only
+        final_audio = voiced
+
+        # Generate embedding from trimmed voiced audio
+        embedding = encoder.embed_utterance(final_audio)
         return embedding.tolist()
     finally:
         os.unlink(tmp_path)
